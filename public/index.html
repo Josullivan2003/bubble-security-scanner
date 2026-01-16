@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bubble App Security Scanner</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Decorative circles -->
+  <div class="decorative-circle decorative-circle-top-right"></div>
+  <div class="decorative-circle decorative-circle-bottom-left"></div>
+
+  <div class="container">
+    <div class="logo-container">
+      <img src="logo.png" alt="NotCode Logo" class="logo">
+    </div>
+
+    <header>
+      <h1>Security Scanner</h1>
+      <p class="subtitle">Audit your Bubble.io applications for exposed data</p>
+    </header>
+
+    <!-- Step 1: URL Input -->
+    <section id="step1" class="step active">
+      <div class="step-header">
+        <span class="step-number">1</span>
+        <h2>Enter Bubble App URL</h2>
+      </div>
+      <div class="input-group">
+        <input
+          type="text"
+          id="bubbleUrl"
+          placeholder="bubble.io"
+          autocomplete="off"
+        >
+        <button id="scanBtn" onclick="startScan()">Scan App</button>
+      </div>
+            <div id="step1Error" class="error-box hidden"></div>
+    </section>
+
+    <!-- Step 2: Table Selection -->
+    <section id="step2" class="step hidden">
+      <div class="step-header">
+        <span class="step-number">2</span>
+        <h2>Select Data Table</h2>
+      </div>
+      <div id="tableList" class="table-list"></div>
+      <div id="step2Error" class="error-box hidden"></div>
+    </section>
+
+    <!-- Step 3 & 4: Results Display -->
+    <section id="step3" class="step hidden">
+      <div class="step-header">
+        <span class="step-number">3</span>
+        <div>
+          <h2>Exposed Data</h2>
+          <p id="resultsInfo" class="results-subtitle"><span id="tableName"></span> - <span id="recordCount">0</span> records found</p>
+        </div>
+      </div>
+      <div id="resultsContainer">
+        <div id="loadingResults" class="loading hidden">
+          <div class="spinner"></div>
+          <span>Fetching data...</span>
+        </div>
+        <div id="tableWrapper" class="table-wrapper">
+          <table id="resultsTable">
+            <thead id="resultsHead"></thead>
+            <tbody id="resultsBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="step3Error" class="error-box hidden"></div>
+    </section>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay hidden">
+      <div class="spinner"></div>
+      <span id="loadingText">Scanning...</span>
+    </div>
+
+    <!-- Record Detail Modal -->
+    <div id="recordModal" class="modal hidden">
+      <div class="modal-backdrop" onclick="closeModal()"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Record Details</h3>
+          <button class="modal-close" onclick="closeModal()">&times;</button>
+        </div>
+        <div class="modal-body" id="modalBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
