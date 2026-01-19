@@ -354,6 +354,13 @@ PRIORITIZATION ORDER (highest to lowest risk):
 5. Personal files/documents
 6. Other PII
 
+EXCLUDE these (NOT sensitive):
+- Tables named "dummy", "test", "demo", "sample", or containing test data
+- Reviews, testimonials, ratings (public-facing content)
+- Stripe IDs, payment IDs, subscription IDs (just references, not actual financial data)
+- Blog posts, articles, public content
+- Product/service information
+
 Return ONLY a JSON object with the top 3-4 most critical tables and their most sensitive columns:
 {
   "tables": [
@@ -370,6 +377,8 @@ Rules:
 - Order tables by criticality (most critical first)
 - Order columns by criticality within each table
 - Column names must be EXACTLY as they appear in the input (no descriptions, explanations, or notes)
+- SKIP tables/columns that are public content or non-sensitive references
+- If nothing truly sensitive is found, return {"tables": []}
 - Return ONLY valid JSON, no other text`
         }
       ]
