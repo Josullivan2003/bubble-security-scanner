@@ -369,6 +369,7 @@ Rules:
 - Maximum 5 columns per table (select the most critical ones)
 - Order tables by criticality (most critical first)
 - Order columns by criticality within each table
+- Column names must be EXACTLY as they appear in the input (no descriptions, explanations, or notes)
 - Return ONLY valid JSON, no other text`
         }
       ]

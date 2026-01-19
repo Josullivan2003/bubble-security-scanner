@@ -1328,20 +1328,13 @@ async function generateOutreachSummary() {
       return;
     }
 
-    // Build HTML bullet list from prioritized data
-    let html = '<ul class="summary-list">';
+    // Build formatted summary: Table — column1, column2
+    let html = '<div class="summary-list">';
     data.tables.forEach(table => {
-      html += `<li>${escapeHtml(table.name)}`;
-      if (table.columns && table.columns.length > 0) {
-        html += '<ul>';
-        table.columns.forEach(col => {
-          html += `<li>${escapeHtml(cleanColumnName(col))}</li>`;
-        });
-        html += '</ul>';
-      }
-      html += '</li>';
+      const columns = table.columns.map(col => escapeHtml(cleanColumnName(col))).join(', ');
+      html += `<p><strong>${escapeHtml(table.name)}</strong> — ${columns}</p>`;
     });
-    html += '</ul>';
+    html += '</div>';
 
     // Update output with HTML
     output.innerHTML = html;
@@ -1352,11 +1345,11 @@ async function generateOutreachSummary() {
   }
 }
 
-// Copy raw HTML code to clipboard as plain text
+// Copy raw HTML code to clipboard
 async function copyTextSummary() {
   const output = document.getElementById('textSummaryOutput');
 
-  // Generate raw HTML code with nested bullet points
+  // Generate raw HTML as bullet points
   const summaryList = output.querySelector('.summary-list');
   if (!summaryList) {
     console.error('No summary list found');
@@ -1365,26 +1358,20 @@ async function copyTextSummary() {
 
   let rawHtml = '<ul>\n';
 
-  summaryList.querySelectorAll(':scope > li').forEach(tableLi => {
-    const tableName = tableLi.childNodes[0].textContent.trim();
-    rawHtml += `  <li>${tableName}\n`;
-
-    const columnUl = tableLi.querySelector('ul');
-    if (columnUl) {
-      rawHtml += '    <ul>\n';
-      columnUl.querySelectorAll('li').forEach(colLi => {
-        rawHtml += `      <li>${colLi.textContent}</li>\n`;
-      });
-      rawHtml += '    </ul>\n';
+  summaryList.querySelectorAll('p').forEach(p => {
+    const strongEl = p.querySelector('strong');
+    if (strongEl) {
+      const tableName = strongEl.textContent;
+      // Get text after the strong element (the " — columns" part)
+      const afterStrong = p.textContent.substring(tableName.length);
+      rawHtml += `  <li><strong>${tableName}</strong>${afterStrong}</li>\n`;
     }
-
-    rawHtml += '  </li>\n';
   });
 
   rawHtml += '</ul>';
 
   try {
-    // Copy raw HTML as plain text
+    // Copy raw HTML
     await navigator.clipboard.writeText(rawHtml);
 
     // Show feedback

@@ -1016,26 +1016,27 @@ button:disabled {
 
 .summary-list {
   margin: 0;
-  padding-left: 1.25rem;
-  list-style-type: disc;
+  padding: 0;
 }
 
-.summary-list > li {
-  margin-bottom: 0.5rem;
-  font-weight: 500;
+.summary-list p {
+  margin: 0 0 0.5rem 0;
   color: #18181b;
+  line-height: 1.5;
 }
 
-.summary-list > li > ul {
-  margin: 0.25rem 0 0 0;
-  padding-left: 1.25rem;
-  list-style-type: circle;
+.summary-list p strong {
+  font-weight: 600;
 }
 
-.summary-list > li > ul > li {
-  font-weight: 400;
-  color: #52525b;
-  margin-bottom: 0.125rem;
+.summary-note {
+  color: #71717a;
+  font-style: italic;
+}
+
+.summary-risk {
+  margin-top: 0.75rem;
+  color: #18181b;
 }
 
 .summary-loading {
