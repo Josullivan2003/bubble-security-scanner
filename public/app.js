@@ -3,6 +3,13 @@ let state = {
   bubbleUrl: '',
   appName: '',
   tables: [],
+  tablesWithColumns: [],
+  tableSensitivity: {},           // Table-level sensitivity (derived from columns)
+  allColumnSensitivity: {},       // Column sensitivity for all tables: { tableId: { colName: sensitivity } }
+  columnSensitivity: {},          // Sensitivity for current table's columns (active view)
+  sensitivityLoading: false,      // Whether sensitivity analysis is in progress
+  columnSensitivityLoading: false,// Whether column sensitivity analysis is in progress
+  showSensitiveOnly: false,       // Filter to show only sensitive data
   selectedTable: '',
   results: [],
   xValue: 'p1w5CLCS+ngwPIcoMz8rpaTc/CREf7bx11VJEJtnKrc=',
@@ -75,6 +82,24 @@ async function startScan() {
 
   state.bubbleUrl = url;
   hideError('step1Error');
+
+  // Reset sensitivity filter toggle
+  state.showSensitiveOnly = false;
+  const sensitivityCheckbox = document.getElementById('sensitivityFilter');
+  if (sensitivityCheckbox) {
+    sensitivityCheckbox.checked = false;
+  }
+
+  // Hide the Exposed Data section
+  document.getElementById('step3').classList.add('hidden');
+
+  // Hide and reset the AI summary section
+  const summarySection = document.getElementById('textSummarySection');
+  if (summarySection) {
+    summarySection.classList.add('hidden');
+    document.getElementById('textSummaryOutput').innerHTML = '';
+  }
+
   showLoading('Identifying app...');
 
   try {
@@ -102,6 +127,9 @@ async function startScan() {
 
     // Step 2: Parse tables from DBML
     updateLoadingText('Discovering data tables...');
+
+    // Store enhanced schema with columns for sensitivity analysis
+    state.tablesWithColumns = schemaData.tablesWithColumns || [];
 
     const tables = schemaData.tables || [];
     const tableMap = new Map();
@@ -132,9 +160,207 @@ async function startScan() {
     await fetchAllTableCounts();
 
     hideLoading();
+
+    // Start sensitivity analysis in background (doesn't block UI)
+    analyzeSensitivity();
   } catch (error) {
     hideLoading();
     showError('step1Error', `Scan failed: ${error.message}`);
+  }
+}
+
+// Analyze data sensitivity using AI - column-level analysis for all tables
+async function analyzeSensitivity() {
+  // Get tables that have actual data (count > 1)
+  const tablesWithData = state.tables.filter(table => {
+    const count = table.recordCount;
+    return count && count !== 0 && count !== '0' && count !== '?' && !table.metadataOnly;
+  });
+
+  if (tablesWithData.length === 0) {
+    console.log('No tables with data to analyze');
+    return;
+  }
+
+  console.log(`Starting column-level sensitivity analysis for ${tablesWithData.length} tables`);
+
+  // Show loading state on table cards
+  state.sensitivityLoading = true;
+  state.tableSensitivity = {};
+  state.allColumnSensitivity = {}; // Store column sensitivity for all tables
+  renderTableList();
+
+  // Process tables in parallel batches of 4
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < tablesWithData.length; i += BATCH_SIZE) {
+    const batch = tablesWithData.slice(i, i + BATCH_SIZE);
+    console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.map(t => t.id).join(', ')}`);
+
+    // Analyze all tables in this batch in parallel
+    await Promise.all(batch.map(table => analyzeTableSensitivity(table)));
+
+    // Update UI after each batch completes
+    renderTableList();
+  }
+
+  // Done analyzing all tables
+  state.sensitivityLoading = false;
+  renderTableList();
+  console.log('Sensitivity analysis complete:', state.tableSensitivity);
+
+  // Generate AI outreach summary after all analysis is done
+  generateOutreachSummary();
+}
+
+// Analyze a single table's sensitivity (used for parallel processing)
+async function analyzeTableSensitivity(table) {
+  try {
+    console.log(`Analyzing table: ${table.id}`);
+
+    // Fetch sample data for this table
+    const sampleData = await fetchTableSample(table.id);
+
+    if (!sampleData || sampleData.length === 0) {
+      console.log(`No sample data for table: ${table.id}`);
+      return;
+    }
+
+    // Extract columns and sample values
+    const columnsWithSamples = extractColumnsWithSamples(sampleData);
+
+    if (columnsWithSamples.length === 0) {
+      console.log(`No columns to analyze for table: ${table.id}`);
+      return;
+    }
+
+    // Call column-level analysis API
+    const response = await fetch('/api/analyze-columns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableName: table.id,
+        columnsWithSamples: columnsWithSamples
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error(`Column analysis failed for ${table.id}:`, data.error);
+      return;
+    }
+
+    // Store column sensitivity for this table
+    const columnSensitivity = {};
+    let highestSensitivity = 'low';
+    const sensitiveFields = [];
+
+    if (data.fields && Array.isArray(data.fields)) {
+      data.fields.forEach(field => {
+        columnSensitivity[field.name] = field.sensitivity;
+        sensitiveFields.push(field.name);
+
+        // Track highest sensitivity
+        if (field.sensitivity === 'high') {
+          highestSensitivity = 'high';
+        } else if (field.sensitivity === 'moderate' && highestSensitivity !== 'high') {
+          highestSensitivity = 'moderate';
+        }
+      });
+    }
+
+    // Store results
+    state.allColumnSensitivity[table.id] = columnSensitivity;
+
+    // Derive table sensitivity from column analysis
+    if (highestSensitivity !== 'low') {
+      state.tableSensitivity[table.id] = {
+        sensitivity: highestSensitivity,
+        reason: `Contains ${highestSensitivity === 'high' ? 'highly' : 'moderately'} sensitive fields: ${sensitiveFields.join(', ')}`
+      };
+    }
+
+  } catch (error) {
+    console.error(`Error analyzing table ${table.id}:`, error);
+  }
+}
+
+// Fetch a small sample of data from a table for sensitivity analysis
+async function fetchTableSample(tableId) {
+  const payload = {
+    app_version: 'live',
+    appname: state.appName,
+    constraints: [],
+    from: 0,
+    n: 5, // Just fetch 5 records for sample
+    search_path: '{"constructor_name":"DataSource","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0.%p.%ds"},{"type":"node","value":{"constructor_name":"Element","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0"}]}},{"type":"raw","value":"Search"}]}',
+    situation: 'initial search',
+    sorts_list: [],
+    type: getTableType(tableId),
+  };
+
+  try {
+    const response = await fetch('/api/fetch-table', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.xValue,
+        y: state.yValue,
+        payload: payload,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+      }),
+    });
+
+    const data = await response.json();
+    return parseResults(data);
+  } catch (error) {
+    console.error(`Failed to fetch sample for ${tableId}:`, error);
+    return [];
+  }
+}
+
+// Extract column names and sample values from data
+function extractColumnsWithSamples(results) {
+  const systemFields = ['_version', '_type', '_id'];
+  const columns = new Set();
+
+  results.forEach(row => {
+    Object.keys(row).forEach(key => {
+      if (!systemFields.includes(key)) {
+        columns.add(key);
+      }
+    });
+  });
+
+  const columnList = Array.from(columns);
+
+  return columnList.map(colName => {
+    const samples = [];
+    for (const row of results) {
+      if (samples.length >= 3) break;
+      const value = row[colName];
+      if (value !== null && value !== undefined && value !== '') {
+        let strValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        if (strValue.length > 100) {
+          strValue = strValue.substring(0, 100) + '...';
+        }
+        if (!samples.includes(strValue)) {
+          samples.push(strValue);
+        }
+      }
+    }
+    return { name: colName, samples };
+  });
+}
+
+// Toggle sensitivity filter
+function toggleSensitivityFilter() {
+  state.showSensitiveOnly = document.getElementById('sensitivityFilter').checked;
+  renderTableList();
+  // Also re-render results table if viewing one
+  if (state.results.length > 0) {
+    renderResultsTable();
   }
 }
 
@@ -236,9 +462,17 @@ function renderTableList() {
   container.innerHTML = '';
 
   // Sort tables alphabetically by display name
-  const sortedTables = [...state.tables].sort((a, b) =>
+  let sortedTables = [...state.tables].sort((a, b) =>
     a.display.toLowerCase().localeCompare(b.display.toLowerCase())
   );
+
+  // Filter to show only sensitive tables if toggle is on
+  if (state.showSensitiveOnly && !state.sensitivityLoading) {
+    sortedTables = sortedTables.filter(table => {
+      const sensitivityData = state.tableSensitivity[table.id];
+      return sensitivityData && (sensitivityData.sensitivity === 'high' || sensitivityData.sensitivity === 'moderate');
+    });
+  }
 
   sortedTables.forEach((table) => {
     const item = document.createElement('div');
@@ -248,11 +482,34 @@ function renderTableList() {
     item.className = 'table-item' + (hasRealData ? '' : ' disabled');
     item.dataset.tableId = table.id;
 
-    // Database icon
-    const icon = document.createElement('span');
-    icon.className = 'table-icon';
-    icon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path></svg>';
-    item.appendChild(icon);
+    // Sensitivity indicator or loading spinner (left side)
+    // Only show loading spinner for tables with data (count > 0)
+    if (state.sensitivityLoading && hasRealData) {
+      // Show loading spinner while analyzing
+      const loadingIcon = document.createElement('span');
+      loadingIcon.className = 'sensitivity-indicator sensitivity-loading-icon';
+      loadingIcon.innerHTML = '<div class="spinner-tiny"></div>';
+      loadingIcon.title = 'Analyzing sensitivity...';
+      item.appendChild(loadingIcon);
+    } else {
+      const sensitivityData = state.tableSensitivity[table.id];
+      if (sensitivityData && sensitivityData.sensitivity !== 'low') {
+        const sensitivityIcon = document.createElement('span');
+        sensitivityIcon.className = 'sensitivity-indicator';
+
+        if (sensitivityData.sensitivity === 'high') {
+          sensitivityIcon.classList.add('sensitivity-high');
+          sensitivityIcon.innerHTML = '!';
+          sensitivityIcon.title = `Highly Sensitive: ${sensitivityData.reason}`;
+        } else if (sensitivityData.sensitivity === 'moderate') {
+          sensitivityIcon.classList.add('sensitivity-moderate');
+          sensitivityIcon.innerHTML = '!';
+          sensitivityIcon.title = `Moderately Sensitive: ${sensitivityData.reason}`;
+        }
+
+        item.appendChild(sensitivityIcon);
+      }
+    }
 
     // Table name
     const nameSpan = document.createElement('span');
@@ -344,6 +601,9 @@ async function selectTable(tableId, displayName) {
     // Render results table
     renderResultsTable();
     document.getElementById('loadingResults').classList.add('hidden');
+
+    // Analyze column sensitivity in background
+    analyzeColumnSensitivity();
   } catch (error) {
     document.getElementById('loadingResults').classList.add('hidden');
     showError('step3Error', `Failed to fetch data: ${error.message}`);
@@ -439,9 +699,39 @@ function renderResultsTable() {
   }
 
   // Filter out hidden columns and maintain order
-  const columnList = state.columnOrder.filter(col =>
+  let columnList = state.columnOrder.filter(col =>
     allColumns.includes(col) && !state.hiddenColumns.includes(col)
   );
+
+  // Filter to show only sensitive columns if toggle is on
+  if (state.showSensitiveOnly) {
+    // If still loading column sensitivity, show loading message
+    if (state.columnSensitivityLoading) {
+      thead.innerHTML = '';
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="100" class="empty-state">
+            <div class="loading-inline">
+              <div class="spinner-small"></div>
+              <span>Analyzing column sensitivity...</span>
+            </div>
+          </td>
+        </tr>`;
+      return;
+    }
+
+    columnList = columnList.filter(col => {
+      const sensitivity = state.columnSensitivity[col];
+      return sensitivity === 'high' || sensitivity === 'moderate';
+    });
+
+    // If no sensitive columns found after analysis, show message
+    if (columnList.length === 0) {
+      thead.innerHTML = '';
+      tbody.innerHTML = '<tr><td colspan="100" class="empty-state">No sensitive columns detected in this table</td></tr>';
+      return;
+    }
+  }
 
   // Render hidden columns indicator
   const hiddenCount = state.hiddenColumns.length;
@@ -466,15 +756,21 @@ function renderResultsTable() {
     <tr>
       ${columnList
         .map(
-          (col) => `
+          (col) => {
+            const fieldSensitivity = getFieldSensitivity(col);
+            const sensitivityIndicator = fieldSensitivity ?
+              `<span class="col-sensitivity-indicator sensitivity-${fieldSensitivity}" title="${fieldSensitivity === 'high' ? 'Highly' : 'Moderately'} Sensitive Field">!</span>` : '';
+            return `
         <th draggable="true" data-column="${escapeHtml(col)}" class="${state.sortColumn === col ? 'sorted' : ''}">
           <div class="th-content">
             <span class="th-label" onclick="sortByColumn('${escapeHtml(col)}')">${escapeHtml(col)}<span class="sort-indicator">${getSortIndicator(col)}</span></span>
+            ${sensitivityIndicator}
             <button class="hide-column-btn" onclick="hideColumn('${escapeHtml(col)}')" title="Hide column">&times;</button>
           </div>
           <div class="resize-handle"></div>
         </th>
-      `
+      `;
+          }
         )
         .join('')}
     </tr>
@@ -648,6 +944,119 @@ function getSortIndicator(column) {
   return state.sortDirection === 'asc' ? '↑' : '↓';
 }
 
+// Analyze actual column names for sensitivity (uses cached data if available)
+async function analyzeColumnSensitivity() {
+  console.log('analyzeColumnSensitivity called, results:', state.results.length);
+  if (state.results.length === 0) return;
+
+  // Check if we already have cached column sensitivity from initial analysis
+  if (state.allColumnSensitivity[state.selectedTable]) {
+    console.log('Using cached column sensitivity for:', state.selectedTable);
+    state.columnSensitivity = state.allColumnSensitivity[state.selectedTable];
+    state.columnSensitivityLoading = false;
+    renderResultsTable();
+    return;
+  }
+
+  // No cached data - need to analyze (this shouldn't happen often now)
+  console.log('No cached data, analyzing columns for:', state.selectedTable);
+
+  // Show loading state
+  state.columnSensitivityLoading = true;
+  if (state.showSensitiveOnly) {
+    renderResultsTable(); // Re-render to show loading message
+  }
+
+  // Get all unique column names from results
+  const systemFields = ['_version', '_type', '_id'];
+  const columns = new Set();
+  state.results.forEach(row => {
+    Object.keys(row).forEach(key => {
+      if (!systemFields.includes(key)) {
+        columns.add(key);
+      }
+    });
+  });
+
+  const columnList = Array.from(columns);
+  if (columnList.length === 0) return;
+
+  // Collect sample values for each column (up to 3 non-empty values)
+  const columnsWithSamples = columnList.map(colName => {
+    const samples = [];
+    for (const row of state.results) {
+      if (samples.length >= 3) break;
+      const value = row[colName];
+      if (value !== null && value !== undefined && value !== '') {
+        // Convert to string and truncate long values
+        let strValue = typeof value === 'object' ? JSON.stringify(value) : String(value);
+        if (strValue.length > 100) {
+          strValue = strValue.substring(0, 100) + '...';
+        }
+        // Avoid duplicate samples
+        if (!samples.includes(strValue)) {
+          samples.push(strValue);
+        }
+      }
+    }
+    return { name: colName, samples };
+  });
+
+  console.log('Sending columns for analysis:', columnsWithSamples.length, columnsWithSamples);
+
+  try {
+    const response = await fetch('/api/analyze-columns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableName: state.selectedTable,
+        columnsWithSamples: columnsWithSamples
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('Column analysis failed:', data.error);
+      state.columnSensitivityLoading = false;
+      if (state.showSensitiveOnly) {
+        renderResultsTable();
+      }
+      return;
+    }
+
+    // Store column sensitivity with exact column names
+    state.columnSensitivity = {};
+    if (data.fields && Array.isArray(data.fields)) {
+      data.fields.forEach(field => {
+        state.columnSensitivity[field.name] = field.sensitivity;
+      });
+    }
+
+    // Also cache for future use
+    state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+
+    // Hide loading state and re-render table to show indicators
+    state.columnSensitivityLoading = false;
+    renderResultsTable();
+  } catch (error) {
+    console.error('Column analysis error:', error);
+    state.columnSensitivityLoading = false;
+    if (state.showSensitiveOnly) {
+      renderResultsTable(); // Re-render to remove loading state
+    }
+  }
+}
+
+// Get field sensitivity for current table (exact match on actual column names)
+function getFieldSensitivity(fieldName) {
+  const sensitivity = state.columnSensitivity[fieldName];
+  if (sensitivity === 'high' || sensitivity === 'moderate') {
+    return sensitivity;
+  }
+  return null;
+}
+
 // Format cell value for display
 function formatValue(value) {
   if (value === null || value === undefined) {
@@ -703,6 +1112,30 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// Clean column name by removing type suffixes and applying replacements
+function cleanColumnName(name) {
+  // Remove common Bubble type suffixes
+  const suffixes = [
+    '_text', '_number', '_date', '_boolean', '_file', '_image',
+    '_geographic address', '_list', '_option', '_user', '_custom'
+  ];
+
+  let cleaned = name;
+  for (const suffix of suffixes) {
+    if (cleaned.toLowerCase().endsWith(suffix)) {
+      cleaned = cleaned.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  // Replace specific column names
+  if (cleaned.toLowerCase() === 'authentication') {
+    cleaned = 'email';
+  }
+
+  return cleaned;
 }
 
 // Format value with clickable links
@@ -819,3 +1252,152 @@ document.addEventListener('keydown', (e) => {
     closeModal();
   }
 });
+
+// Toggle text summary visibility
+function toggleTextSummary() {
+  const content = document.getElementById('textSummaryContent');
+  const icon = document.querySelector('.text-summary-toggle-icon');
+
+  if (content.classList.contains('hidden')) {
+    content.classList.remove('hidden');
+    icon.textContent = '▼';
+  } else {
+    content.classList.add('hidden');
+    icon.textContent = '▶';
+  }
+}
+
+// Generate AI-prioritized outreach summary (only highly sensitive data)
+async function generateOutreachSummary() {
+  const section = document.getElementById('textSummarySection');
+  const output = document.getElementById('textSummaryOutput');
+
+  // Only show if sensitivity analysis is complete and we have data
+  if (state.sensitivityLoading || Object.keys(state.allColumnSensitivity).length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  // Get tables that have high sensitivity columns
+  const sensitiveData = [];
+
+  state.tables.forEach(table => {
+    const hasData = table.recordCount && table.recordCount !== 0 && table.recordCount !== '0' && !table.metadataOnly;
+    const columnSensitivity = state.allColumnSensitivity[table.id];
+
+    if (!hasData || !columnSensitivity) return;
+
+    // Only include highly sensitive columns
+    const highColumns = Object.keys(columnSensitivity).filter(col => {
+      return columnSensitivity[col] === 'high';
+    });
+
+    if (highColumns.length > 0) {
+      sensitiveData.push({
+        name: table.display,
+        columns: highColumns
+      });
+    }
+  });
+
+  if (sensitiveData.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+
+  // Show section with loading state
+  section.classList.remove('hidden');
+  output.innerHTML = '<div class="summary-loading">Analyzing and prioritizing critical exposures...</div>';
+
+  try {
+    // Call AI to prioritize
+    const response = await fetch('/api/generate-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appName: state.appName,
+        sensitiveData: sensitiveData
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.error || !data.tables) {
+      console.error('Summary generation failed:', data.error);
+      output.innerHTML = '<div class="summary-error">Failed to generate summary. Please try again.</div>';
+      return;
+    }
+
+    // Build HTML bullet list from prioritized data
+    let html = '<ul class="summary-list">';
+    data.tables.forEach(table => {
+      html += `<li>${escapeHtml(table.name)}`;
+      if (table.columns && table.columns.length > 0) {
+        html += '<ul>';
+        table.columns.forEach(col => {
+          html += `<li>${escapeHtml(cleanColumnName(col))}</li>`;
+        });
+        html += '</ul>';
+      }
+      html += '</li>';
+    });
+    html += '</ul>';
+
+    // Update output with HTML
+    output.innerHTML = html;
+
+  } catch (error) {
+    console.error('Summary generation error:', error);
+    output.innerHTML = '<div class="summary-error">Failed to generate summary. Please try again.</div>';
+  }
+}
+
+// Copy raw HTML code to clipboard as plain text
+async function copyTextSummary() {
+  const output = document.getElementById('textSummaryOutput');
+
+  // Generate raw HTML code with nested bullet points
+  const summaryList = output.querySelector('.summary-list');
+  if (!summaryList) {
+    console.error('No summary list found');
+    return;
+  }
+
+  let rawHtml = '<ul>\n';
+
+  summaryList.querySelectorAll(':scope > li').forEach(tableLi => {
+    const tableName = tableLi.childNodes[0].textContent.trim();
+    rawHtml += `  <li>${tableName}\n`;
+
+    const columnUl = tableLi.querySelector('ul');
+    if (columnUl) {
+      rawHtml += '    <ul>\n';
+      columnUl.querySelectorAll('li').forEach(colLi => {
+        rawHtml += `      <li>${colLi.textContent}</li>\n`;
+      });
+      rawHtml += '    </ul>\n';
+    }
+
+    rawHtml += '  </li>\n';
+  });
+
+  rawHtml += '</ul>';
+
+  try {
+    // Copy raw HTML as plain text
+    await navigator.clipboard.writeText(rawHtml);
+
+    // Show feedback
+    const btn = document.querySelector('.copy-summary-btn-header');
+    const originalText = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.classList.remove('copied');
+    }, 2000);
+  } catch (err) {
+    console.error('Failed to copy:', err);
+  }
+}

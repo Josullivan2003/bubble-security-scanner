@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=18">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -41,11 +41,33 @@
 
     <!-- Step 2: Table Selection -->
     <section id="step2" class="step hidden">
+      <div id="sensitivityLoading" class="sensitivity-loading hidden">
+        <div class="spinner-small"></div>
+        <span id="sensitivityLoadingText">Running security checks...</span>
+      </div>
       <div class="step-header">
         <span class="step-number">2</span>
         <h2>Select Data Table</h2>
+        <label class="sensitivity-toggle">
+          <input type="checkbox" id="sensitivityFilter" onchange="toggleSensitivityFilter()">
+          <span class="toggle-slider"></span>
+          <span class="toggle-label">Show sensitive only</span>
+        </label>
       </div>
       <div id="tableList" class="table-list"></div>
+
+      <!-- Text Summary Section -->
+      <div id="textSummarySection" class="text-summary-section hidden">
+        <div class="text-summary-header" onclick="toggleTextSummary()">
+          <span class="text-summary-toggle-icon">▶</span>
+          <h3>Outreach Summary</h3>
+          <button class="copy-summary-btn-header" onclick="event.stopPropagation(); copyTextSummary()">Copy</button>
+        </div>
+        <div id="textSummaryContent" class="text-summary-content hidden">
+          <div id="textSummaryOutput" class="summary-output" contenteditable="true"></div>
+        </div>
+      </div>
+
       <div id="step2Error" class="error-box hidden"></div>
     </section>
 
@@ -92,6 +114,6 @@
     </div>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=30"></script>
 </body>
 </html>
