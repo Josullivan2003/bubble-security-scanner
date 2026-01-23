@@ -7,6 +7,7 @@ let state = {
   tableSensitivity: {},           // Table-level sensitivity (derived from columns)
   allColumnSensitivity: {},       // Column sensitivity for all tables: { tableId: { colName: sensitivity } }
   columnSensitivity: {},          // Sensitivity for current table's columns (active view)
+  manualColumnOverrides: {},      // Manual column sensitivity overrides: { tableId: { colName: sensitivity } }
   sensitivityLoading: false,      // Whether sensitivity analysis is in progress
   columnSensitivityLoading: false,// Whether column sensitivity analysis is in progress
   showSensitiveOnly: false,       // Filter to show only sensitive data
@@ -721,7 +722,7 @@ function renderResultsTable() {
     }
 
     columnList = columnList.filter(col => {
-      const sensitivity = state.columnSensitivity[col];
+      const sensitivity = getFieldSensitivity(col);
       return sensitivity === 'high' || sensitivity === 'moderate';
     });
 
@@ -758,14 +759,19 @@ function renderResultsTable() {
         .map(
           (col) => {
             const fieldSensitivity = getFieldSensitivity(col);
+            const isManualOverride = hasManualOverride(col);
+            // If there's a sensitivity indicator, make it clickable; otherwise show the flag button
             const sensitivityIndicator = fieldSensitivity ?
-              `<span class="col-sensitivity-indicator sensitivity-${fieldSensitivity}" title="${fieldSensitivity === 'high' ? 'Highly' : 'Moderately'} Sensitive Field">!</span>` : '';
+              `<span class="col-sensitivity-indicator sensitivity-${fieldSensitivity}${isManualOverride ? ' manual-override' : ''}" onclick="toggleSensitivityMenu(event, '${escapeJsString(col)}')" title="Click to change: ${fieldSensitivity === 'high' ? 'Highly' : 'Moderately'} Sensitive${isManualOverride ? ' (Manual)' : ''}">!</span>` : '';
+            const flagButton = !fieldSensitivity ?
+              `<button class="flag-sensitivity-btn" onclick="toggleSensitivityMenu(event, '${escapeJsString(col)}')" title="Flag sensitivity">&#9873;</button>` : '';
             return `
         <th draggable="true" data-column="${escapeHtml(col)}" class="${state.sortColumn === col ? 'sorted' : ''}">
           <div class="th-content">
-            <span class="th-label" onclick="sortByColumn('${escapeHtml(col)}')">${escapeHtml(col)}<span class="sort-indicator">${getSortIndicator(col)}</span></span>
+            <span class="th-label" onclick="sortByColumn('${escapeJsString(col)}')">${escapeHtml(col)}<span class="sort-indicator">${getSortIndicator(col)}</span></span>
             ${sensitivityIndicator}
-            <button class="hide-column-btn" onclick="hideColumn('${escapeHtml(col)}')" title="Hide column">&times;</button>
+            ${flagButton}
+            <button class="hide-column-btn" onclick="hideColumn('${escapeJsString(col)}')" title="Hide column">&times;</button>
           </div>
           <div class="resize-handle"></div>
         </th>
@@ -1049,12 +1055,146 @@ async function analyzeColumnSensitivity() {
 }
 
 // Get field sensitivity for current table (exact match on actual column names)
+// Manual overrides take priority over AI-detected sensitivity
 function getFieldSensitivity(fieldName) {
+  // Check manual override first
+  const tableOverrides = state.manualColumnOverrides[state.selectedTable];
+  if (tableOverrides && tableOverrides[fieldName] !== undefined) {
+    const override = tableOverrides[fieldName];
+    // If manually set to 'low', return null (not sensitive)
+    if (override === 'low') {
+      return null;
+    }
+    if (override === 'high' || override === 'moderate') {
+      return override;
+    }
+  }
+
+  // Fall back to AI-detected sensitivity
   const sensitivity = state.columnSensitivity[fieldName];
   if (sensitivity === 'high' || sensitivity === 'moderate') {
     return sensitivity;
   }
   return null;
+}
+
+// Check if a column has a manual override
+function hasManualOverride(fieldName) {
+  const tableOverrides = state.manualColumnOverrides[state.selectedTable];
+  return tableOverrides && tableOverrides[fieldName] !== undefined;
+}
+
+// Set manual sensitivity override for a column
+function setManualSensitivity(fieldName, sensitivity) {
+  if (!state.manualColumnOverrides[state.selectedTable]) {
+    state.manualColumnOverrides[state.selectedTable] = {};
+  }
+
+  // Store the override (including 'low' to override AI classification)
+  state.manualColumnOverrides[state.selectedTable][fieldName] = sensitivity;
+
+  // Recalculate table-level sensitivity
+  updateTableSensitivity(state.selectedTable);
+
+  renderResultsTable();
+  renderTableList();
+}
+
+// Recalculate table-level sensitivity based on AI + manual overrides
+function updateTableSensitivity(tableId) {
+  const aiSensitivity = state.allColumnSensitivity[tableId] || {};
+  const manualOverrides = state.manualColumnOverrides[tableId] || {};
+
+  // Get all columns from current results
+  const columns = new Set();
+  state.results.forEach(row => {
+    Object.keys(row).forEach(key => {
+      if (!['_version', '_type'].includes(key)) {
+        columns.add(key);
+      }
+    });
+  });
+
+  let highestSensitivity = 'low';
+  const sensitiveFields = [];
+
+  columns.forEach(col => {
+    // Manual override takes priority
+    const sensitivity = manualOverrides[col] || aiSensitivity[col];
+
+    if (sensitivity === 'high') {
+      highestSensitivity = 'high';
+      sensitiveFields.push(col);
+    } else if (sensitivity === 'moderate') {
+      if (highestSensitivity !== 'high') {
+        highestSensitivity = 'moderate';
+      }
+      sensitiveFields.push(col);
+    }
+  });
+
+  // Update table sensitivity
+  if (highestSensitivity !== 'low') {
+    state.tableSensitivity[tableId] = {
+      sensitivity: highestSensitivity,
+      reason: `Contains ${highestSensitivity === 'high' ? 'highly' : 'moderately'} sensitive fields: ${sensitiveFields.join(', ')}`
+    };
+  } else {
+    // Remove table sensitivity if no sensitive columns
+    delete state.tableSensitivity[tableId];
+  }
+}
+
+// Toggle sensitivity menu for a column
+function toggleSensitivityMenu(event, fieldName) {
+  event.stopPropagation();
+
+  // Close any existing menu
+  const existingMenu = document.querySelector('.sensitivity-menu');
+  if (existingMenu) {
+    existingMenu.remove();
+  }
+
+  const button = event.currentTarget;
+  const rect = button.getBoundingClientRect();
+
+  // Create menu
+  const menu = document.createElement('div');
+  menu.className = 'sensitivity-menu';
+  menu.innerHTML = `
+    <div class="sensitivity-menu-item sensitivity-menu-high" onclick="setManualSensitivity('${escapeJsString(fieldName)}', 'high')">
+      <span class="menu-indicator sensitivity-high">!</span>
+      Flag as Highly Sensitive
+    </div>
+    <div class="sensitivity-menu-item sensitivity-menu-moderate" onclick="setManualSensitivity('${escapeJsString(fieldName)}', 'moderate')">
+      <span class="menu-indicator sensitivity-moderate">!</span>
+      Flag as Moderately Sensitive
+    </div>
+    <div class="sensitivity-menu-item sensitivity-menu-clear" onclick="setManualSensitivity('${escapeJsString(fieldName)}', 'low')">
+      <span class="menu-indicator">&#x2715;</span>
+      Mark as Not Sensitive
+    </div>
+  `;
+
+  // Position menu below button
+  menu.style.position = 'fixed';
+  menu.style.top = (rect.bottom + 4) + 'px';
+  menu.style.left = rect.left + 'px';
+
+  document.body.appendChild(menu);
+
+  // Close menu when clicking outside
+  const closeMenu = (e) => {
+    if (!menu.contains(e.target)) {
+      menu.remove();
+      document.removeEventListener('click', closeMenu);
+    }
+  };
+
+  // Delay adding listener to prevent immediate close
+  setTimeout(() => {
+    document.addEventListener('click', closeMenu);
+  }, 0);
 }
 
 // Format cell value for display
@@ -1112,6 +1252,16 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+// Escape string for use in JavaScript string literals within HTML attributes
+function escapeJsString(str) {
+  return String(str)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '\\"')
+    .replace(/</g, '\\x3c')
+    .replace(/>/g, '\\x3e');
 }
 
 // Clean column name by removing type suffixes and applying replacements
