@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css?v=18">
+  <link rel="stylesheet" href="styles.css?v=19">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -60,10 +60,11 @@
       <div id="textSummarySection" class="text-summary-section hidden">
         <div class="text-summary-header" onclick="toggleTextSummary()">
           <span class="text-summary-toggle-icon">▶</span>
-          <h3>Outreach Summary</h3>
-          <button class="copy-summary-btn-header" onclick="event.stopPropagation(); copyTextSummary()">Copy</button>
+          <h3>Summary</h3>
+          <span id="summaryRiskBadge" class="header-risk-badge"></span>
         </div>
         <div id="textSummaryContent" class="text-summary-content hidden">
+          <button class="copy-summary-btn" onclick="event.stopPropagation(); copyTextSummary()">Copy</button>
           <div id="textSummaryOutput" class="summary-output" contenteditable="true"></div>
         </div>
       </div>
@@ -114,6 +115,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=30"></script>
+  <script src="app.js?v=31"></script>
 </body>
 </html>

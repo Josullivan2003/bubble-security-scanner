@@ -1144,3 +1144,82 @@ button:disabled {
   border: 2px solid rgba(255, 255, 255, 0.8);
   box-shadow: 0 0 0 1px currentColor;
 }
+
+/* Risk Badge Styles */
+.risk-badge {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.risk-high {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3);
+}
+
+.risk-medium {
+  background: linear-gradient(135deg, #eab308 0%, #ca8a04 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(234, 179, 8, 0.3);
+}
+
+.risk-low {
+  background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
+}
+
+.risk-none {
+  background: linear-gradient(135deg, #71717a 0%, #52525b 100%);
+  color: white;
+  box-shadow: 0 2px 8px rgba(113, 113, 122, 0.3);
+}
+
+/* Header Risk Badge (inline in summary header) */
+.header-risk-badge {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.header-risk-badge:empty {
+  display: none;
+}
+
+/* Copy button in content area */
+.text-summary-content {
+  position: relative;
+}
+
+.copy-summary-btn {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.75rem;
+  background: #18181b;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  z-index: 1;
+}
+
+.copy-summary-btn:hover {
+  background: #27272a;
+}
+
+.copy-summary-btn.copied {
+  background: #16a34a;
+}

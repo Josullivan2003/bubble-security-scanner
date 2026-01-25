@@ -1478,13 +1478,23 @@ async function generateOutreachSummary() {
       return;
     }
 
-    // Build formatted summary: Table — column1, column2
-    let html = '<div class="summary-list">';
-    data.tables.forEach(table => {
-      const columns = table.columns.map(col => escapeHtml(cleanColumnName(col))).join(', ');
-      html += `<p><strong>${escapeHtml(table.name)}</strong> — ${columns}</p>`;
-    });
-    html += '</div>';
+    // Update risk badge in header
+    const riskClass = data.risk || 'none';
+    const riskLabels = { high: 'High Risk', medium: 'Medium Risk', low: 'Low Risk', none: 'No Risk' };
+    const riskBadge = document.getElementById('summaryRiskBadge');
+    riskBadge.className = `header-risk-badge risk-${riskClass}`;
+    riskBadge.textContent = riskLabels[riskClass];
+
+    // Build table list for output
+    let html = '';
+    if (data.tables && data.tables.length > 0) {
+      html = '<div class="summary-list">';
+      data.tables.forEach(table => {
+        const columns = table.columns.map(col => escapeHtml(cleanColumnName(col))).join(', ');
+        html += `<p><strong>${escapeHtml(table.name)}</strong> — ${columns}</p>`;
+      });
+      html += '</div>';
+    }
 
     // Update output with HTML
     output.innerHTML = html;
@@ -1525,7 +1535,7 @@ async function copyTextSummary() {
     await navigator.clipboard.writeText(rawHtml);
 
     // Show feedback
-    const btn = document.querySelector('.copy-summary-btn-header');
+    const btn = document.querySelector('.copy-summary-btn');
     const originalText = btn.textContent;
     btn.textContent = 'Copied!';
     btn.classList.add('copied');
