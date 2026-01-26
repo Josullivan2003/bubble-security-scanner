@@ -56,6 +56,14 @@ function parseUrlParams() {
   if (params.y) {
     state.yValue = params.y;
   }
+
+  // Auto-populate and trigger scan if app URL provided
+  if (params.app) {
+    const urlInput = document.getElementById('bubbleUrl');
+    urlInput.value = params.app;
+    // Trigger scan after a short delay to ensure DOM is ready
+    setTimeout(() => startScan(), 100);
+  }
 }
 
 // Step 1: Start scanning the Bubble app
