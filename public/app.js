@@ -19,6 +19,7 @@ let state = {
   sortDirection: 'asc',
   hiddenColumns: [],
   columnOrder: [],
+  failedTables: [],               // Tables that failed analysis (for retry)
 };
 
 // Initialize
@@ -197,6 +198,7 @@ async function analyzeSensitivity() {
   state.sensitivityLoading = true;
   state.tableSensitivity = {};
   state.allColumnSensitivity = {}; // Store column sensitivity for all tables
+  state.failedTables = []; // Track failed tables for retry
   renderTableList();
 
   // Process tables in parallel batches of 4
@@ -212,10 +214,26 @@ async function analyzeSensitivity() {
     renderTableList();
   }
 
+  // Retry failed tables once (in smaller batches)
+  if (state.failedTables.length > 0) {
+    console.log(`Retrying ${state.failedTables.length} failed tables: ${state.failedTables.map(t => t.id).join(', ')}`);
+    const retryTables = [...state.failedTables];
+    state.failedTables = [];
+
+    for (let i = 0; i < retryTables.length; i += 2) {
+      const batch = retryTables.slice(i, i + 2);
+      await Promise.all(batch.map(table => analyzeTableSensitivity(table)));
+      renderTableList();
+    }
+  }
+
   // Done analyzing all tables
   state.sensitivityLoading = false;
   renderTableList();
   console.log('Sensitivity analysis complete:', state.tableSensitivity);
+  if (state.failedTables.length > 0) {
+    console.log(`Failed to analyze ${state.failedTables.length} tables after retry`);
+  }
 
   // Generate AI outreach summary after all analysis is done
   generateOutreachSummary();
@@ -291,6 +309,10 @@ async function analyzeTableSensitivity(table) {
 
   } catch (error) {
     console.error(`Error analyzing table ${table.id}:`, error);
+    // Track failed table for retry
+    if (state.failedTables && !state.failedTables.find(t => t.id === table.id)) {
+      state.failedTables.push(table);
+    }
   }
 }
 
