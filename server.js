@@ -667,7 +667,7 @@ Only include HIGH or MODERATE columns.`
     console.log(`[Audit] Found ${sensitiveData.length} tables with sensitive data`);
 
     if (sensitiveData.length === 0) {
-      return res.json({ tables: [] });
+      return res.json({ risk: 'none', secure: true, tables: [] });
     }
 
     // Step 4: Generate prioritized summary with risk classification
@@ -706,6 +706,7 @@ Max 4 tables, max 5 columns each, ordered by criticality. If risk is "none", tab
     if (summaryMatch) summaryJson = summaryMatch[1];
 
     const summary = JSON.parse(summaryJson.trim());
+    summary.secure = summary.risk === 'none';
     console.log(`[Audit] Audit complete:`, JSON.stringify(summary));
 
     res.json(summary);
