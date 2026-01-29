@@ -1554,7 +1554,7 @@ function updateSummaryRiskBadge() {
   const isOverridden = state.summaryRiskOverride && state.summaryRiskOverride !== state.summaryOriginalRisk;
 
   riskBadge.className = `header-risk-badge risk-${riskClass} clickable${isOverridden ? ' overridden' : ''}`;
-  riskBadge.textContent = riskLabels[riskClass] + (isOverridden ? ' (edited)' : '');
+  riskBadge.textContent = riskLabels[riskClass];
 }
 
 // Cycle through risk levels when clicking the badge
