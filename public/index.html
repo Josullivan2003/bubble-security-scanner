@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css?v=19">
+  <link rel="stylesheet" href="styles.css?v=25">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -47,14 +47,34 @@
       </div>
       <div class="step-header">
         <span class="step-number">2</span>
-        <h2>Select Data Table</h2>
-        <label class="sensitivity-toggle">
-          <input type="checkbox" id="sensitivityFilter" onchange="toggleSensitivityFilter()">
-          <span class="toggle-slider"></span>
-          <span class="toggle-label">Show sensitive only</span>
-        </label>
+        <h2>Security Analysis</h2>
       </div>
-      <div id="tableList" class="table-list"></div>
+
+      <!-- Tab Navigation -->
+      <div class="tab-nav">
+        <button class="tab-btn active" data-tab="tables" onclick="switchTab('tables')">Data Tables</button>
+        <button class="tab-btn" data-tab="endpoints" onclick="switchTab('endpoints')">API Endpoints</button>
+        <div id="tabFilterContainer" class="tab-filter-container">
+          <!-- Filter toggles are inserted here dynamically -->
+        </div>
+      </div>
+
+      <!-- Tables Panel -->
+      <div id="tablesPanel" class="tab-panel">
+        <div id="tableList" class="table-list"></div>
+      </div>
+
+      <!-- Endpoints Panel -->
+      <div id="endpointsPanel" class="tab-panel hidden">
+        <div id="endpointsLoading" class="endpoints-loading hidden">
+          <div class="spinner-small"></div>
+          <span>Analyzing API endpoints...</span>
+        </div>
+        <div id="endpointsEmpty" class="endpoints-empty hidden">
+          <p>No workflow APIs found for this application.</p>
+        </div>
+        <div id="endpointsList" class="endpoints-list"></div>
+      </div>
 
       <!-- Text Summary Section -->
       <div id="textSummarySection" class="text-summary-section hidden">
@@ -115,6 +135,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=33"></script>
+  <script src="app.js?v=40"></script>
 </body>
 </html>

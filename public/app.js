@@ -20,6 +20,11 @@ let state = {
   hiddenColumns: [],
   columnOrder: [],
   failedTables: [],               // Tables that failed analysis (for retry)
+  // API Endpoint analysis state
+  activeTab: 'tables',            // 'tables' | 'endpoints'
+  endpointAnalysis: null,         // Endpoint analysis results
+  endpointAnalysisLoading: false, // Loading state for endpoint analysis
+  showCallableOnly: false,        // Toggle to show only callable endpoints
 };
 
 // Initialize
@@ -163,6 +168,7 @@ async function startScan() {
 
     // Display tables initially (without counts)
     renderTableList();
+    renderTabFilter();
     document.getElementById('step2').classList.remove('hidden');
 
     // Fetch record counts for each table in parallel
@@ -230,6 +236,7 @@ async function analyzeSensitivity() {
   // Done analyzing all tables
   state.sensitivityLoading = false;
   renderTableList();
+  renderTabFilter();
   console.log('Sensitivity analysis complete:', state.tableSensitivity);
   if (state.failedTables.length > 0) {
     console.log(`Failed to analyze ${state.failedTables.length} tables after retry`);
@@ -237,6 +244,9 @@ async function analyzeSensitivity() {
 
   // Generate AI outreach summary after all analysis is done
   generateOutreachSummary();
+
+  // Run endpoint analysis in background (now that we have exposed data)
+  analyzeEndpoints();
 }
 
 // Analyze a single table's sensitivity (used for parallel processing)
@@ -1532,6 +1542,302 @@ async function generateOutreachSummary() {
   } catch (error) {
     console.error('Summary generation error:', error);
     output.innerHTML = '<div class="summary-error">Failed to generate summary. Please try again.</div>';
+  }
+}
+
+// Switch between tabs (tables/endpoints)
+function switchTab(tabName) {
+  state.activeTab = tabName;
+
+  // Update tab buttons
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tabName);
+  });
+
+  // Update panels
+  document.getElementById('tablesPanel').classList.toggle('hidden', tabName !== 'tables');
+  document.getElementById('endpointsPanel').classList.toggle('hidden', tabName !== 'endpoints');
+
+  // Render appropriate filter toggle
+  renderTabFilter();
+
+  // If switching to endpoints, show current state
+  if (tabName === 'endpoints') {
+    if (state.endpointAnalysis) {
+      // Already have results, render them
+      renderEndpointsList();
+    } else if (state.endpointAnalysisLoading) {
+      // Analysis in progress, show loading
+      document.getElementById('endpointsLoading').classList.remove('hidden');
+    } else if (state.sensitivityLoading) {
+      // Waiting for data analysis to complete first
+      document.getElementById('endpointsLoading').classList.remove('hidden');
+      document.querySelector('#endpointsLoading span').textContent = 'Waiting for data analysis to complete...';
+    }
+  }
+}
+
+// Render the filter toggle based on active tab
+function renderTabFilter() {
+  const container = document.getElementById('tabFilterContainer');
+  if (!container) return;
+
+  if (state.activeTab === 'tables') {
+    // Data tables filter
+    const sensitiveCount = Object.values(state.tableSensitivity).filter(s =>
+      s.sensitivity === 'high' || s.sensitivity === 'moderate'
+    ).length;
+    container.innerHTML = `
+      <label class="filter-toggle">
+        <input type="checkbox" id="sensitivityFilter" ${state.showSensitiveOnly ? 'checked' : ''} onchange="toggleSensitivityFilter()">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">Show sensitive only (${sensitiveCount})</span>
+      </label>
+    `;
+  } else if (state.activeTab === 'endpoints') {
+    // Endpoints filter
+    const callableCount = state.endpointAnalysis?.workflows?.filter(w => w.isCallable).length || 0;
+    container.innerHTML = `
+      <label class="filter-toggle">
+        <input type="checkbox" id="callableFilter" ${state.showCallableOnly ? 'checked' : ''} onchange="toggleCallableFilter()">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">Show sensitive only (${callableCount})</span>
+      </label>
+    `;
+  }
+}
+
+// Deterministic endpoint security analysis
+async function analyzeEndpoints() {
+  if (!state.bubbleUrl) return;
+
+  state.endpointAnalysisLoading = true;
+  document.getElementById('endpointsLoading').classList.remove('hidden');
+  document.getElementById('endpointsEmpty').classList.add('hidden');
+  document.getElementById('endpointsList').innerHTML = '';
+
+  try {
+    // Step 1: Fetch workflow definitions
+    const response = await fetch('/api/workflows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: state.bubbleUrl })
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+
+    const { workflows } = data;
+    if (!workflows || workflows.length === 0) {
+      state.endpointAnalysis = { workflows: [] };
+      state.endpointAnalysisLoading = false;
+      document.getElementById('endpointsLoading').classList.add('hidden');
+      renderEndpointsList();
+      return;
+    }
+
+    // Build set of exposed table names (lowercase for matching)
+    const exposedTables = new Set();
+    const tablesWithData = state.tables.filter(t =>
+      t.recordCount && t.recordCount !== 0 && t.recordCount !== '0' && !t.metadataOnly
+    );
+    tablesWithData.forEach(t => exposedTables.add(t.id.toLowerCase().replace(/\s+/g, '')));
+
+    // Filter out webhooks and analyze parameters
+    const filteredWorkflows = workflows
+      .filter(w => !w.isWebhook)
+      .map(workflow => {
+        const parameters = workflow.parameters.map(param => {
+          const analysis = {
+            name: param.name,
+            type: param.type,
+            required: param.required,
+            status: 'attacker', // default: attacker provides the value
+            exposedTable: null
+          };
+
+          // Check if this contains a custom type (references a database table)
+          // Handles: custom.asset, list.custom.asset, etc.
+          const customMatch = param.type.match(/custom\.([^.\s]+)/i);
+          if (customMatch) {
+            const customTypeName = customMatch[1].toLowerCase().replace(/\s+/g, '');
+            if (exposedTables.has(customTypeName)) {
+              analysis.status = 'exposed';
+              analysis.exposedTable = customMatch[1]; // Keep original casing for display
+            } else {
+              analysis.status = 'protected';
+            }
+          } else if (param.type === 'user' || param.type.includes('user')) {
+            if (exposedTables.has('user')) {
+              analysis.status = 'exposed';
+              analysis.exposedTable = 'User';
+            } else {
+              analysis.status = 'protected';
+            }
+          }
+
+          return analysis;
+        });
+
+        // Check if endpoint is callable (all required params are exposed or attacker-provided)
+        const requiredParams = parameters.filter(p => p.required);
+        const isCallable = requiredParams.every(p => p.status === 'exposed' || p.status === 'attacker');
+
+        return {
+          ...workflow,
+          parameters,
+          isCallable
+        };
+      })
+      .sort((a, b) => {
+        // Callable first, then no auth, then alphabetically
+        if (a.isCallable && !b.isCallable) return -1;
+        if (!a.isCallable && b.isCallable) return 1;
+        if (!a.authRequired && b.authRequired) return -1;
+        if (a.authRequired && !b.authRequired) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    state.endpointAnalysis = { workflows: filteredWorkflows };
+
+    document.getElementById('endpointsLoading').classList.add('hidden');
+    renderEndpointsList();
+    renderTabFilter();
+
+    state.endpointAnalysisLoading = false;
+    console.log('Endpoint analysis complete:', filteredWorkflows.length, 'workflows');
+
+  } catch (error) {
+    console.error('Endpoint analysis failed:', error);
+    state.endpointAnalysisLoading = false;
+    document.getElementById('endpointsLoading').classList.add('hidden');
+    document.getElementById('endpointsEmpty').innerHTML = `<p>Failed to analyze endpoints: ${error.message}</p>`;
+    document.getElementById('endpointsEmpty').classList.remove('hidden');
+  }
+}
+
+// Helper to render a parameter row
+function renderParamRow(param) {
+  let statusLabel;
+  if (param.status === 'exposed' && param.exposedTable) {
+    statusLabel = `Data exposed in ${param.exposedTable} table`;
+  } else if (param.status === 'protected') {
+    statusLabel = 'NOT EXPOSED';
+  } else {
+    statusLabel = 'EXPLOITABLE';
+  }
+
+  return `
+    <div class="param-row">
+      <span class="param-name">${param.name}</span>
+      <span class="param-type">${param.type}</span>
+      <span class="param-status ${param.status}">${statusLabel}</span>
+    </div>
+  `;
+}
+
+// Helper to render a section of parameters
+function renderParamsSection(params, label) {
+  if (!params || params.length === 0) return '';
+  return `
+    <div class="params-section">
+      <div class="params-label">${label}</div>
+      ${params.map(renderParamRow).join('')}
+    </div>
+  `;
+}
+
+// Render the endpoints list with toggle filter
+function renderEndpointsList() {
+  const container = document.getElementById('endpointsList');
+  const emptyEl = document.getElementById('endpointsEmpty');
+
+  if (!state.endpointAnalysis) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const { workflows } = state.endpointAnalysis;
+
+  // If no workflows found
+  if (!workflows || workflows.length === 0) {
+    emptyEl.innerHTML = `<p>No workflow APIs found for this application.</p>`;
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+
+  // Apply filter
+  let filteredWorkflows = workflows;
+  if (state.showCallableOnly) {
+    filteredWorkflows = workflows.filter(w => w.isCallable);
+  }
+
+  let html = '';
+
+  if (filteredWorkflows.length === 0) {
+    html += `<div class="endpoints-empty"><p>No sensitive endpoints found.</p></div>`;
+  } else {
+    html += `<div class="endpoints-list">`;
+    filteredWorkflows.forEach(workflow => {
+      const workflowId = workflow.name.replace(/[^a-zA-Z0-9]/g, '_');
+      const noAuth = !workflow.authRequired;
+      const hasParams = workflow.parameters.length > 0;
+
+      html += `
+        <div class="endpoint-item ${noAuth ? 'no-auth-endpoint' : ''} ${workflow.isCallable ? 'callable' : ''}" onclick="toggleEndpointDetails('${workflowId}')">
+          <div class="endpoint-header">
+            <div class="endpoint-main">
+              ${workflow.isCallable ? `<span class="callable-indicator ${noAuth ? 'critical' : 'warning'}" title="All required data is available">!</span>` : ''}
+              <span class="endpoint-path">/api/1.1/wf/${workflow.name}</span>
+              ${hasParams ? `<span class="expand-icon">&#9660;</span>` : ''}
+            </div>
+            <div class="endpoint-auth">
+              ${workflow.isCallable
+                ? (noAuth
+                    ? `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required, and all parameters exposed.</span>`
+                    : `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required, but all parameters exposed.</span>`)
+                : (noAuth
+                    ? `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required.</span>`
+                    : `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required.</span>`)
+              }
+            </div>
+          </div>
+          ${hasParams ? `
+            <div class="endpoint-details" id="endpoint-${workflowId}">
+              ${renderParamsSection(workflow.parameters.filter(p => p.required), 'Required Parameters')}
+              ${renderParamsSection(workflow.parameters.filter(p => !p.required), 'Optional Parameters')}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    });
+    html += `</div>`;
+  }
+
+  container.innerHTML = html;
+}
+
+// Toggle callable filter
+function toggleCallableFilter() {
+  state.showCallableOnly = !state.showCallableOnly;
+  renderEndpointsList();
+}
+
+// Toggle endpoint details visibility
+function toggleEndpointDetails(endpointId) {
+  const details = document.getElementById(`endpoint-${endpointId}`);
+  if (!details) return;
+
+  const item = details.closest('.endpoint-item');
+
+  if (details.classList.contains('expanded')) {
+    details.classList.remove('expanded');
+    item.classList.remove('expanded');
+  } else {
+    details.classList.add('expanded');
+    item.classList.add('expanded');
   }
 }
 

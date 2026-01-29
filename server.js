@@ -716,6 +716,153 @@ Max 4 tables, max 5 columns each, ordered by criticality. If risk is "none", tab
   }
 });
 
+// AI-powered endpoint security analysis
+// Get workflow definitions from meta API (no AI, just parsing)
+app.post('/api/workflows', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  try {
+    const baseUrl = new URL(url).origin;
+    const metaUrl = `${baseUrl}/api/1.1/meta`;
+
+    console.log(`[Workflows] Fetching meta from: ${metaUrl}`);
+    const metaResponse = await fetch(metaUrl);
+    const metaData = await metaResponse.json();
+
+    if (!metaData.post || metaData.post.length === 0) {
+      return res.json({ workflows: [] });
+    }
+
+    // Dangerous action keywords (from endpoint names)
+    const criticalActions = ['delete', 'remove', 'export', 'payment', 'billing', 'charge', 'admin', 'password', 'reset_password'];
+    const highActions = ['email', 'send', 'update', 'modify', 'edit', 'create', 'add', 'cancel', 'subscription'];
+    const sensitiveData = ['user', 'customer', 'account', 'order', 'invoice', 'card', 'bank', 'ssn', 'address', 'phone'];
+
+    // Parse workflow definitions
+    const workflows = metaData.post
+      .filter(wf => wf.endpoint)
+      .map(wf => {
+        const endpointLower = wf.endpoint.toLowerCase();
+
+        // Check if this is a webhook (has request data parameter)
+        const isWebhook = (wf.parameters || []).some(p =>
+          p.key === '_wf_request_data' || p.key === 'request_data'
+        );
+
+        // Analyze endpoint name for dangerous actions
+        const hasCriticalAction = criticalActions.some(a => endpointLower.includes(a));
+        const hasHighAction = highActions.some(a => endpointLower.includes(a));
+        const involvesSensitiveData = sensitiveData.some(d => endpointLower.includes(d));
+
+        const parameters = (wf.parameters || [])
+          .filter(p => p.key !== '_wf_request_data' && p.key !== 'request_data')
+          .map(p => ({
+            name: p.key,
+            type: p.value || 'text',
+            required: !p.optional
+          }));
+
+        // Check for custom type parameters
+        const hasCustomParams = parameters.some(p =>
+          p.type.startsWith('custom.') || p.type === 'user'
+        );
+
+        return {
+          name: wf.endpoint,
+          authRequired: !wf.auth_unecessary,
+          isWebhook,
+          parameters,
+          // Risk factors from endpoint name analysis
+          riskFactors: {
+            hasCriticalAction,
+            hasHighAction,
+            involvesSensitiveData,
+            hasCustomParams,
+            noAuth: wf.auth_unecessary === true
+          }
+        };
+      });
+
+    console.log(`[Workflows] Found ${workflows.length} workflow APIs`);
+    res.json({ workflows });
+  } catch (error) {
+    console.error('Workflows fetch error:', error);
+    res.status(500).json({ error: 'Failed to fetch workflows', details: error.message });
+  }
+});
+
+// AI analysis of endpoint names to assess risk
+app.post('/api/analyze-endpoint-risk', async (req, res) => {
+  const { endpoints } = req.body;
+
+  if (!endpoints || endpoints.length === 0) {
+    return res.json({ analysis: {} });
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: 'Anthropic API key not configured' });
+  }
+
+  try {
+    const endpointsList = endpoints.map(ep =>
+      `- ${ep.name} (auth_required: ${ep.authRequired})`
+    ).join('\n');
+
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      messages: [
+        {
+          role: 'user',
+          content: `Analyze these API endpoint names and assess the security risk based on what each endpoint likely DOES.
+
+${endpointsList}
+
+IMPORTANT: Risk level should be based ONLY on what the action does, NOT on whether auth is required. Auth only affects WHO can exploit it, not the damage potential.
+
+For each endpoint, provide:
+1. "risk": "critical" | "high" | "medium" | "low" based on how dangerous the ACTION is:
+   - critical: Financial actions (payments, billing), mass data export, account/user deletion, role changes
+   - high: Send emails, modify user data, create accounts, access sensitive records
+   - medium: Update settings, create standard records, standard CRUD operations
+   - low: Read-only operations, user preferences, non-sensitive actions
+
+2. "explanation": One sentence for a non-technical business owner. Start with:
+   - If auth_required=false: "Anyone on the internet can..."
+   - If auth_required=true: "Any logged-in user can..."
+
+Respond with JSON only:
+{
+  "endpoint_name": {
+    "risk": "high",
+    "explanation": "Anyone on the internet can download your complete customer database"
+  }
+}`
+        }
+      ]
+    });
+
+    const responseText = message.content[0].text;
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1];
+    }
+
+    const analysis = JSON.parse(jsonStr.trim());
+    console.log(`[Endpoint Risk] Analyzed ${Object.keys(analysis).length} endpoints`);
+
+    res.json({ analysis });
+  } catch (error) {
+    console.error('Endpoint risk analysis error:', error);
+    res.status(500).json({ error: 'Failed to analyze endpoint risk', details: error.message });
+  }
+});
+
 // Serve the main page
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
