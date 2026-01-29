@@ -1211,6 +1211,20 @@ button:disabled {
   display: none;
 }
 
+.header-risk-badge.clickable {
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.header-risk-badge.clickable:hover {
+  transform: scale(1.05);
+  opacity: 0.9;
+}
+
+.header-risk-badge.overridden {
+  border: 1px dashed currentColor;
+}
+
 /* Copy button in content area */
 .text-summary-content {
   position: relative;
@@ -1251,6 +1265,8 @@ button:disabled {
 
 .tab-filter-container {
   margin-left: auto;
+  display: flex;
+  gap: 1.5rem;
 }
 
 .tab-btn {

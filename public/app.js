@@ -25,6 +25,8 @@ let state = {
   endpointAnalysis: null,         // Endpoint analysis results
   endpointAnalysisLoading: false, // Loading state for endpoint analysis
   showCallableOnly: false,        // Toggle to show only callable endpoints
+  summaryRiskOverride: null,      // Manual override for summary risk level
+  summaryOriginalRisk: null,      // Original AI-determined risk level
 };
 
 // Initialize
@@ -1518,12 +1520,9 @@ async function generateOutreachSummary() {
       return;
     }
 
-    // Update risk badge in header
-    const riskClass = data.risk || 'none';
-    const riskLabels = { high: 'High Risk', medium: 'Medium Risk', low: 'Low Risk', none: 'No Risk' };
-    const riskBadge = document.getElementById('summaryRiskBadge');
-    riskBadge.className = `header-risk-badge risk-${riskClass}`;
-    riskBadge.textContent = riskLabels[riskClass];
+    // Store original risk and update badge
+    state.summaryOriginalRisk = data.risk || 'none';
+    updateSummaryRiskBadge();
 
     // Build table list for output
     let html = '';
@@ -1543,6 +1542,30 @@ async function generateOutreachSummary() {
     console.error('Summary generation error:', error);
     output.innerHTML = '<div class="summary-error">Failed to generate summary. Please try again.</div>';
   }
+}
+
+// Update summary risk badge display
+function updateSummaryRiskBadge() {
+  const riskBadge = document.getElementById('summaryRiskBadge');
+  if (!riskBadge) return;
+
+  const riskClass = state.summaryRiskOverride || state.summaryOriginalRisk || 'none';
+  const riskLabels = { high: 'High Risk', medium: 'Medium Risk', low: 'Low Risk', none: 'No Risk' };
+  const isOverridden = state.summaryRiskOverride && state.summaryRiskOverride !== state.summaryOriginalRisk;
+
+  riskBadge.className = `header-risk-badge risk-${riskClass} clickable${isOverridden ? ' overridden' : ''}`;
+  riskBadge.textContent = riskLabels[riskClass] + (isOverridden ? ' (edited)' : '');
+}
+
+// Cycle through risk levels when clicking the badge
+function cycleSummaryRisk() {
+  const riskLevels = ['low', 'medium', 'high'];
+  const currentRisk = state.summaryRiskOverride || state.summaryOriginalRisk || 'low';
+  const currentIndex = riskLevels.indexOf(currentRisk);
+  const nextIndex = (currentIndex + 1) % riskLevels.length;
+
+  state.summaryRiskOverride = riskLevels[nextIndex];
+  updateSummaryRiskBadge();
 }
 
 // Switch between tabs (tables/endpoints)

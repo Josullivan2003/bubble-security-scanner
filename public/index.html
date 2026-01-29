@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css?v=25">
+  <link rel="stylesheet" href="styles.css?v=26">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -81,7 +81,7 @@
         <div class="text-summary-header" onclick="toggleTextSummary()">
           <span class="text-summary-toggle-icon">▶</span>
           <h3>Summary</h3>
-          <span id="summaryRiskBadge" class="header-risk-badge"></span>
+          <span id="summaryRiskBadge" class="header-risk-badge clickable" onclick="event.stopPropagation(); cycleSummaryRisk()" title="Click to change risk level"></span>
         </div>
         <div id="textSummaryContent" class="text-summary-content hidden">
           <button class="copy-summary-btn" onclick="event.stopPropagation(); copyTextSummary()">Copy</button>
@@ -135,6 +135,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=40"></script>
+  <script src="app.js?v=41"></script>
 </body>
 </html>
