@@ -1072,7 +1072,9 @@ app.post('/api/scan-api-keys', async (req, res) => {
 
   // Track diagnostic info for debugging
   let diagnosticInfo = {
+    version: 'v3-chromium-min',
     isVercel: !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME),
+    nodeVersion: process.version,
     chromiumLoaded: !!chromium,
     localChrome: null,
     launchError: null
