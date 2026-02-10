@@ -5,7 +5,31 @@ import { dirname, join } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
+
+// Dynamic import for @sparticuz/chromium (only available in serverless)
+let chromium = null;
+try {
+  chromium = (await import('@sparticuz/chromium')).default;
+} catch (e) {
+  console.log('[@sparticuz/chromium not available, will try local Chrome]');
+}
+
+import fs from 'fs';
+function findLocalChrome() {
+  const paths = [
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  ];
+  for (const p of paths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
 
 dotenv.config();
 
@@ -1045,12 +1069,32 @@ app.post('/api/scan-api-keys', async (req, res) => {
 
   try {
     // Try to launch Puppeteer
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
-    });
+    // Use local Chrome for development, @sparticuz/chromium for Vercel
+    let launchOptions;
+    const isVercel = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      // Use local Chrome for development
+      console.log('[API Keys] Using local Chrome:', localChrome);
+      launchOptions = {
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      };
+    } else if (chromium && isVercel) {
+      // Use @sparticuz/chromium for Vercel serverless
+      console.log('[API Keys] Using @sparticuz/chromium');
+      launchOptions = {
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+      };
+    } else {
+      throw new Error('No Chrome browser found');
+    }
+    browser = await puppeteer.launch(launchOptions);
   } catch (launchError) {
     console.log(`[API Keys] Puppeteer launch failed, using HTML fallback:`, launchError.message);
     useFallback = true;
