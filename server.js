@@ -1067,12 +1067,21 @@ app.post('/api/scan-api-keys', async (req, res) => {
   let browser = null;
   let useFallback = false;
 
+  // Track diagnostic info for debugging
+  let diagnosticInfo = {
+    isVercel: !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME),
+    chromiumLoaded: !!chromium,
+    localChrome: null,
+    launchError: null
+  };
+
   try {
     // Try to launch Puppeteer
     // Use local Chrome for development, @sparticuz/chromium for Vercel
     let launchOptions;
-    const isVercel = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+    const isVercel = diagnosticInfo.isVercel;
     const localChrome = findLocalChrome();
+    diagnosticInfo.localChrome = localChrome;
 
     if (localChrome && !isVercel) {
       // Use local Chrome for development
@@ -1097,6 +1106,7 @@ app.post('/api/scan-api-keys', async (req, res) => {
     browser = await puppeteer.launch(launchOptions);
   } catch (launchError) {
     console.log(`[API Keys] Puppeteer launch failed, using HTML fallback:`, launchError.message);
+    diagnosticInfo.launchError = launchError.message;
     useFallback = true;
   }
 
@@ -1133,7 +1143,8 @@ app.post('/api/scan-api-keys', async (req, res) => {
         apiConnector2: extractedData.apiConnector2,
         clientSafe: extractedData.clientSafe,
         scannedUrl: url,
-        method: 'html-fallback'
+        method: 'html-fallback',
+        debug: diagnosticInfo
       });
     }
 
