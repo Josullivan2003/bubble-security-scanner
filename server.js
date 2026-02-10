@@ -4,7 +4,8 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 
 dotenv.config();
 
@@ -1045,8 +1046,10 @@ app.post('/api/scan-api-keys', async (req, res) => {
   try {
     // Try to launch Puppeteer
     browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
     });
   } catch (launchError) {
     console.log(`[API Keys] Puppeteer launch failed, using HTML fallback:`, launchError.message);
