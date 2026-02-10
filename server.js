@@ -928,6 +928,107 @@ const API_KEY_PATTERNS = [
   }
 ];
 
+// Fallback: Extract API data from HTML without Puppeteer
+async function extractApiDataFromHtml(url) {
+  console.log(`[API Keys] Using HTML fallback for: ${url}`);
+
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+  });
+
+  const html = await response.text();
+
+  const result = {
+    clientSafe: null,
+    apiConnector2: null,
+    allKeys: [],
+    debugInfo: { method: 'html-fallback' }
+  };
+
+  // Look for client_safe data in script tags
+  // Bubble embeds this data in various ways
+  const patterns = [
+    /settings\s*[=:]\s*(\{[\s\S]*?"client_safe"\s*:\s*\{[\s\S]*?\}\s*\})/,
+    /client_safe['"]\s*:\s*(\{[\s\S]*?\})\s*[,}]/,
+    /apiconnector2['"]\s*:\s*(\{[\s\S]*?\})\s*[,}]/i,
+  ];
+
+  // Try to find and parse client_safe or apiconnector2 data
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match) {
+      try {
+        // Clean up the match and try to parse
+        let jsonStr = match[1];
+        // Balance braces
+        let braceCount = 0;
+        let endIdx = 0;
+        for (let i = 0; i < jsonStr.length; i++) {
+          if (jsonStr[i] === '{') braceCount++;
+          if (jsonStr[i] === '}') braceCount--;
+          if (braceCount === 0) {
+            endIdx = i + 1;
+            break;
+          }
+        }
+        if (endIdx > 0) {
+          jsonStr = jsonStr.substring(0, endIdx);
+        }
+
+        const parsed = JSON.parse(jsonStr);
+        if (parsed.client_safe) {
+          result.clientSafe = parsed.client_safe;
+          if (parsed.client_safe.apiconnector2) {
+            result.apiConnector2 = parsed.client_safe.apiconnector2;
+          }
+        } else if (parsed.apiconnector2) {
+          result.apiConnector2 = parsed.apiconnector2;
+        } else {
+          // Might be the client_safe object directly
+          result.clientSafe = parsed;
+          if (parsed.apiconnector2) {
+            result.apiConnector2 = parsed.apiconnector2;
+          }
+        }
+        break;
+      } catch (e) {
+        console.log(`[API Keys] Failed to parse pattern match:`, e.message);
+      }
+    }
+  }
+
+  // Also try to find meta script with bubble data
+  const metaMatch = html.match(/<script[^>]*id=["']bubble-data["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (metaMatch) {
+    try {
+      const data = JSON.parse(metaMatch[1]);
+      if (data.settings?.client_safe) {
+        result.clientSafe = data.settings.client_safe;
+        if (data.settings.client_safe.apiconnector2) {
+          result.apiConnector2 = data.settings.client_safe.apiconnector2;
+        }
+      }
+    } catch (e) {
+      console.log(`[API Keys] Failed to parse bubble-data script:`, e.message);
+    }
+  }
+
+  // Extract keys from clientSafe
+  if (result.clientSafe) {
+    for (const [key, value] of Object.entries(result.clientSafe)) {
+      if (key === 'apiconnector2') {
+        result.apiConnector2 = value;
+      } else if (typeof value === 'string' && value.length > 0) {
+        result.allKeys.push({ name: key, value: value });
+      }
+    }
+  }
+
+  return result;
+}
+
 // Scan for API keys by accessing page JavaScript objects
 app.post('/api/scan-api-keys', async (req, res) => {
   const { url } = req.body;
@@ -939,13 +1040,57 @@ app.post('/api/scan-api-keys', async (req, res) => {
   console.log(`[API Keys] Starting scan for: ${url}`);
 
   let browser = null;
+  let useFallback = false;
 
   try {
-    // Launch Puppeteer
+    // Try to launch Puppeteer
     browser = await puppeteer.launch({
       headless: 'new',
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
+  } catch (launchError) {
+    console.log(`[API Keys] Puppeteer launch failed, using HTML fallback:`, launchError.message);
+    useFallback = true;
+  }
+
+  try {
+    // If Puppeteer failed to launch, use HTML fallback
+    if (useFallback) {
+      const extractedData = await extractApiDataFromHtml(url);
+
+      const apiKeys = extractedData.allKeys.map(key => {
+        let keyType = 'Unknown';
+        let description = 'API key or configuration value';
+
+        if (key.name.toLowerCase().includes('stripe')) {
+          keyType = 'Stripe';
+          description = key.value.startsWith('pk_') ? 'Stripe publishable key' : 'Stripe key';
+        } else if (key.name.toLowerCase().includes('google')) {
+          keyType = 'Google';
+          description = 'Google API key';
+        }
+
+        return {
+          name: key.name,
+          value: key.value,
+          type: keyType,
+          description: description,
+          risk: key.value.startsWith('sk_') ? 'critical' : 'low'
+        };
+      });
+
+      console.log(`[API Keys] HTML fallback found ${apiKeys.length} keys`);
+
+      return res.json({
+        apiKeys: apiKeys,
+        apiConnector2: extractedData.apiConnector2,
+        clientSafe: extractedData.clientSafe,
+        scannedUrl: url,
+        method: 'html-fallback'
+      });
+    }
+
+    // Puppeteer path - original code
 
     const page = await browser.newPage();
 
