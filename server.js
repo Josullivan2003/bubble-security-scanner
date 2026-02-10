@@ -1145,12 +1145,21 @@ app.post('/api/scan-api-keys', async (req, res) => {
     // Navigate to the page
     console.log(`[API Keys] Navigating to ${url}`);
     await page.goto(url, {
-      waitUntil: 'networkidle2',
-      timeout: 30000
+      waitUntil: 'networkidle0',
+      timeout: 45000
     });
 
-    // Wait for page to fully initialize
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Wait for Bubble app to fully initialize (they load JS dynamically)
+    console.log(`[API Keys] Waiting for Bubble app to initialize...`);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Try to wait for Bubble's app object to be available
+    try {
+      await page.waitForFunction(() => window.app && window.app.settings, { timeout: 10000 });
+      console.log(`[API Keys] Bubble app object detected`);
+    } catch (e) {
+      console.log(`[API Keys] Bubble app object not found after wait, continuing anyway`);
+    }
 
     // Extract API connector data from page context - specifically settings.client_safe
     const extractedData = await page.evaluate(() => {
@@ -1279,7 +1288,8 @@ app.post('/api/scan-api-keys', async (req, res) => {
     });
 
     console.log(`[API Keys] Debug info:`, JSON.stringify(extractedData.debugInfo, null, 2));
-
+    console.log(`[API Keys] clientSafe found:`, !!extractedData.clientSafe);
+    console.log(`[API Keys] apiConnector2 found:`, !!extractedData.apiConnector2);
     console.log(`[API Keys] Extracted ${extractedData.allKeys?.length || 0} keys from client_safe`);
 
     // Close browser
