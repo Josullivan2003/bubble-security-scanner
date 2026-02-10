@@ -1916,7 +1916,7 @@ async function scanApiKeys() {
     const data = await response.json();
 
     if (data.error) {
-      throw new Error(data.error);
+      throw new Error(data.details || data.error);
     }
 
     state.apiKeysAnalysis = data;
