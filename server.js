@@ -6,16 +6,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import puppeteer from 'puppeteer-core';
 
-// Dynamic import for @sparticuz/chromium-min (for serverless)
-let chromium = null;
-try {
-  chromium = (await import('@sparticuz/chromium-min')).default;
-} catch (e) {
-  console.log('[@sparticuz/chromium-min not available, will try local Chrome]');
-}
-
-// URL for Chromium binary (used by chromium-min)
-const CHROMIUM_URL = 'https://github.com/Sparticuz/chromium/releases/download/v122.0.0/chromium-v122.0.0-pack.tar';
+// Browserless.io API key for serverless environments
+const BROWSERLESS_API_KEY = process.env.BROWSERLESS_API_KEY;
 
 import fs from 'fs';
 function findLocalChrome() {
@@ -1072,46 +1064,38 @@ app.post('/api/scan-api-keys', async (req, res) => {
 
   // Track diagnostic info for debugging
   let diagnosticInfo = {
-    version: 'v3-chromium-min',
+    version: 'v4-browserless',
     isVercel: !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME),
     nodeVersion: process.version,
-    chromiumLoaded: !!chromium,
-    localChrome: null,
+    method: null,
     launchError: null
   };
 
   try {
-    // Try to launch Puppeteer
-    // Use local Chrome for development, @sparticuz/chromium for Vercel
-    let launchOptions;
     const isVercel = diagnosticInfo.isVercel;
     const localChrome = findLocalChrome();
-    diagnosticInfo.localChrome = localChrome;
 
     if (localChrome && !isVercel) {
       // Use local Chrome for development
       console.log('[API Keys] Using local Chrome:', localChrome);
-      launchOptions = {
+      diagnosticInfo.method = 'local-chrome';
+      browser = await puppeteer.launch({
         executablePath: localChrome,
         headless: 'new',
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      };
-    } else if (chromium && isVercel) {
-      // Use @sparticuz/chromium-min for Vercel serverless
-      console.log('[API Keys] Using @sparticuz/chromium-min with remote binary');
-      launchOptions = {
-        args: [...chromium.args, '--hide-scrollbars', '--disable-web-security'],
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(CHROMIUM_URL),
-        headless: 'shell',
-        ignoreHTTPSErrors: true,
-      };
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      // Use Browserless.io for serverless environments
+      console.log('[API Keys] Using Browserless.io');
+      diagnosticInfo.method = 'browserless';
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
     } else {
-      throw new Error('No Chrome browser found');
+      throw new Error('No browser available (no local Chrome and no Browserless API key)');
     }
-    browser = await puppeteer.launch(launchOptions);
   } catch (launchError) {
-    console.log(`[API Keys] Puppeteer launch failed, using HTML fallback:`, launchError.message);
+    console.log(`[API Keys] Browser connection failed, using HTML fallback:`, launchError.message);
     diagnosticInfo.launchError = launchError.message;
     useFallback = true;
   }
