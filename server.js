@@ -6,13 +6,16 @@ import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import puppeteer from 'puppeteer-core';
 
-// Dynamic import for @sparticuz/chromium (only available in serverless)
+// Dynamic import for @sparticuz/chromium-min (for serverless)
 let chromium = null;
 try {
-  chromium = (await import('@sparticuz/chromium')).default;
+  chromium = (await import('@sparticuz/chromium-min')).default;
 } catch (e) {
-  console.log('[@sparticuz/chromium not available, will try local Chrome]');
+  console.log('[@sparticuz/chromium-min not available, will try local Chrome]');
 }
+
+// URL for Chromium binary (used by chromium-min)
+const CHROMIUM_URL = 'https://github.com/Sparticuz/chromium/releases/download/v122.0.0/chromium-v122.0.0-pack.tar';
 
 import fs from 'fs';
 function findLocalChrome() {
@@ -1092,13 +1095,14 @@ app.post('/api/scan-api-keys', async (req, res) => {
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
       };
     } else if (chromium && isVercel) {
-      // Use @sparticuz/chromium for Vercel serverless
-      console.log('[API Keys] Using @sparticuz/chromium');
+      // Use @sparticuz/chromium-min for Vercel serverless
+      console.log('[API Keys] Using @sparticuz/chromium-min with remote binary');
       launchOptions = {
-        args: chromium.args,
+        args: [...chromium.args, '--hide-scrollbars', '--disable-web-security'],
         defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
+        executablePath: await chromium.executablePath(CHROMIUM_URL),
+        headless: 'shell',
+        ignoreHTTPSErrors: true,
       };
     } else {
       throw new Error('No Chrome browser found');
