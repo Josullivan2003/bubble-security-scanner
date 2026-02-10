@@ -27,6 +27,17 @@ let state = {
   showCallableOnly: false,        // Toggle to show only callable endpoints
   summaryRiskOverride: null,      // Manual override for summary risk level
   summaryOriginalRisk: null,      // Original AI-determined risk level
+  // API Keys analysis state
+  apiKeysAnalysis: null,          // { keys: [], consoleCount: 0 }
+  apiKeysLoading: false,          // Loading state for API keys scan
+  apiExposureAnalysis: null,      // AI analysis of API exposure risk
+  apiExposureLoading: false,      // Loading state for exposure analysis
+  riskFilters: {                  // Multi-select risk level filters
+    critical: false,
+    high: false,
+    medium: false
+  },
+  manualApiOverrides: {},         // Manual API call severity: { "connectorName|callName": { risk, issue } }
 };
 
 // Initialize
@@ -249,6 +260,9 @@ async function analyzeSensitivity() {
 
   // Run endpoint analysis in background (now that we have exposed data)
   analyzeEndpoints();
+
+  // Run API keys scan in background
+  scanApiKeys();
 }
 
 // Analyze a single table's sensitivity (used for parallel processing)
@@ -1568,7 +1582,7 @@ function cycleSummaryRisk() {
   updateSummaryRiskBadge();
 }
 
-// Switch between tabs (tables/endpoints)
+// Switch between tabs (tables/endpoints/keys)
 function switchTab(tabName) {
   state.activeTab = tabName;
 
@@ -1580,6 +1594,7 @@ function switchTab(tabName) {
   // Update panels
   document.getElementById('tablesPanel').classList.toggle('hidden', tabName !== 'tables');
   document.getElementById('endpointsPanel').classList.toggle('hidden', tabName !== 'endpoints');
+  document.getElementById('keysPanel').classList.toggle('hidden', tabName !== 'keys');
 
   // Render appropriate filter toggle
   renderTabFilter();
@@ -1596,6 +1611,18 @@ function switchTab(tabName) {
       // Waiting for data analysis to complete first
       document.getElementById('endpointsLoading').classList.remove('hidden');
       document.querySelector('#endpointsLoading span').textContent = 'Waiting for data analysis to complete...';
+    }
+  }
+
+  // If switching to keys, show current state or trigger scan
+  if (tabName === 'keys') {
+    if (state.apiKeysAnalysis) {
+      renderApiKeysList();
+    } else if (state.apiKeysLoading) {
+      document.getElementById('keysLoading').classList.remove('hidden');
+    } else if (state.bubbleUrl && !state.apiKeysLoading) {
+      // Trigger scan if we have a URL but haven't scanned yet
+      scanApiKeys();
     }
   }
 }
@@ -1627,6 +1654,9 @@ function renderTabFilter() {
         <span class="toggle-label">Show sensitive only (${callableCount})</span>
       </label>
     `;
+  } else if (state.activeTab === 'keys') {
+    // API Keys tab - no filter display needed
+    container.innerHTML = '';
   }
 }
 
@@ -1861,6 +1891,1010 @@ function toggleEndpointDetails(endpointId) {
   } else {
     details.classList.add('expanded');
     item.classList.add('expanded');
+  }
+}
+
+// Scan for API keys in console output using Puppeteer
+async function scanApiKeys() {
+  if (!state.bubbleUrl) return;
+
+  // Reset previous analysis state
+  state.apiKeysAnalysis = null;
+  state.apiExposureAnalysis = null;
+  state.apiKeysLoading = true;
+  document.getElementById('keysLoading').classList.remove('hidden');
+  document.getElementById('keysEmpty').classList.add('hidden');
+  document.getElementById('keysList').innerHTML = '';
+
+  try {
+    const response = await fetch('/api/scan-api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: state.bubbleUrl })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new Error(data.error);
+    }
+
+    state.apiKeysAnalysis = data;
+    state.apiKeysLoading = false;
+
+    document.getElementById('keysLoading').classList.add('hidden');
+    renderApiKeysList();
+    renderTabFilter();
+
+    console.log(`[API Keys] Scan complete: ${data.totalMessages} console messages, ${data.detectedKeys?.length || 0} keys found`);
+
+    // Auto-run AI security analysis after collecting APIs
+    if (state.apiKeysAnalysis && (state.apiKeysAnalysis.apiConnector2 || state.apiKeysAnalysis.apiKeys?.length > 0)) {
+      analyzeApiExposure();
+    }
+
+  } catch (error) {
+    console.error('API Keys scan failed:', error);
+    state.apiKeysLoading = false;
+    document.getElementById('keysLoading').classList.add('hidden');
+    document.getElementById('keysEmpty').innerHTML = `<p>Failed to scan for API keys: ${error.message}</p>`;
+    document.getElementById('keysEmpty').classList.remove('hidden');
+  }
+}
+
+// Render the API keys list from extracted page data
+function renderApiKeysList() {
+  const container = document.getElementById('keysList');
+  const emptyEl = document.getElementById('keysEmpty');
+
+  if (!state.apiKeysAnalysis) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const { apiKeys, apiConnector2, clientSafe } = state.apiKeysAnalysis;
+
+  // If no data found
+  if ((!apiKeys || apiKeys.length === 0) && !apiConnector2) {
+    emptyEl.innerHTML = `<p>No API keys found in settings.client_safe</p>`;
+    emptyEl.classList.remove('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+
+  let html = '';
+
+  // Show all API Calls in a compact expanded view
+  if (apiConnector2) {
+    const apiCalls = parseApiConnectorCalls(apiConnector2);
+    if (apiCalls.length > 0) {
+      // Helper to get risk level for a call
+      const getCallRiskLevel = (call) => {
+        const manualOrAiFinding = getSecurityFinding(call.parentName, call.name);
+        const autoDetected = detectAutoSecurityIssues(call);
+        const finding = manualOrAiFinding || autoDetected;
+        return finding ? (finding.risk || 'medium').toLowerCase() : null;
+      };
+
+      // Count calls by risk level
+      const riskCounts = { critical: 0, high: 0, medium: 0 };
+      apiCalls.forEach(call => {
+        const risk = getCallRiskLevel(call);
+        if (risk && riskCounts.hasOwnProperty(risk)) {
+          riskCounts[risk]++;
+        }
+      });
+
+      const hasAnyRiskFilter = state.riskFilters.critical || state.riskFilters.high || state.riskFilters.medium;
+
+      html += '<div class="api-calls-container compact-view">';
+      html += `<div class="api-calls-header">`;
+      html += `<h3 class="section-title">API Calls <span class="count-badge">${apiCalls.length}</span></h3>`;
+      html += `<div class="filter-toggles risk-filters">`;
+
+      // Add risk level filter toggles
+      if (riskCounts.critical > 0) {
+        html += `
+          <label class="risk-filter-btn ${state.riskFilters.critical ? 'active' : ''} risk-critical" onclick="toggleRiskFilter('critical')">
+            Critical (${riskCounts.critical})
+          </label>
+        `;
+      }
+      if (riskCounts.high > 0) {
+        html += `
+          <label class="risk-filter-btn ${state.riskFilters.high ? 'active' : ''} risk-high" onclick="toggleRiskFilter('high')">
+            High (${riskCounts.high})
+          </label>
+        `;
+      }
+      if (riskCounts.medium > 0) {
+        html += `
+          <label class="risk-filter-btn ${state.riskFilters.medium ? 'active' : ''} risk-medium" onclick="toggleRiskFilter('medium')">
+            Medium (${riskCounts.medium})
+          </label>
+        `;
+      }
+
+      html += '</div></div>';
+
+      apiCalls.forEach((call, index) => {
+        const riskLevel = getCallRiskLevel(call);
+
+        // Apply risk filters (if any filter is active, only show matching risks)
+        if (hasAnyRiskFilter) {
+          if (!riskLevel || !state.riskFilters[riskLevel]) {
+            return;
+          }
+        }
+
+        html += renderCompactApiCall(call, index);
+      });
+
+      html += '</div>';
+    }
+  }
+
+  // Show AI analysis loading state
+  if (state.apiExposureLoading) {
+    html += `
+      <div class="ai-analysis-section">
+        <div class="analysis-loading">
+          <span class="spinner-small"></span>
+          <span>Running AI security analysis...</span>
+        </div>
+      </div>
+    `;
+  }
+
+  container.innerHTML = html;
+}
+
+// Analyze API exposure using AI
+async function analyzeApiExposure() {
+  if (!state.apiKeysAnalysis) return;
+
+  state.apiExposureLoading = true;
+  renderApiKeysList();
+
+  try {
+    const response = await fetch('/api/analyze-api-exposure', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        apiConnectors: state.apiKeysAnalysis.apiConnector2,
+        apiKeys: state.apiKeysAnalysis.apiKeys
+      })
+    });
+
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+
+    state.apiExposureAnalysis = data;
+    state.apiExposureLoading = false;
+    renderApiKeysList();
+
+  } catch (error) {
+    console.error('API exposure analysis failed:', error);
+    state.apiExposureLoading = false;
+    state.apiExposureAnalysis = {
+      summary: 'Analysis failed: ' + error.message,
+      riskLevel: 'ERROR',
+      findings: []
+    };
+    renderApiKeysList();
+  }
+}
+
+// Render API exposure analysis results
+function renderApiExposureResults() {
+  const container = document.getElementById('apiExposureResults');
+  if (!container || !state.apiExposureAnalysis) return;
+
+  const { summary, riskLevel, findings } = state.apiExposureAnalysis;
+
+  const riskClass = riskLevel.toLowerCase();
+
+  let html = `
+    <div class="exposure-results">
+      <div class="exposure-summary risk-${riskClass}">
+        <div class="risk-badge">${escapeHtml(riskLevel)}</div>
+        <p>${escapeHtml(summary)}</p>
+      </div>
+  `;
+
+  if (findings && findings.length > 0) {
+    html += '<div class="exposure-findings">';
+    findings.forEach(finding => {
+      const findingRisk = (finding.risk || 'unknown').toLowerCase();
+      html += `
+        <div class="finding-card risk-${findingRisk}">
+          <div class="finding-header">
+            <span class="finding-risk-badge">${escapeHtml(finding.risk || 'UNKNOWN')}</span>
+            <span class="finding-location">${escapeHtml(finding.connector || '')}${finding.call ? ' → ' + escapeHtml(finding.call) : ''}</span>
+          </div>
+          <div class="finding-issue">${escapeHtml(finding.issue)}</div>
+          <div class="finding-recommendation"><strong>Fix:</strong> ${escapeHtml(finding.recommendation)}</div>
+        </div>
+      `;
+    });
+    html += '</div>';
+  } else if (riskLevel !== 'ERROR') {
+    html += '<p class="no-findings">No critical security issues found.</p>';
+  }
+
+  html += '</div>';
+  container.innerHTML = html;
+}
+
+// Parse apiconnector2 data to extract individual API calls
+function parseApiConnectorCalls(apiConnector2) {
+  const calls = [];
+
+  if (!apiConnector2 || typeof apiConnector2 !== 'object') {
+    return calls;
+  }
+
+  // Iterate through all API connectors (top level)
+  for (const [connectorId, connectorData] of Object.entries(apiConnector2)) {
+    if (!connectorData || typeof connectorData !== 'object') continue;
+
+    // Look for human-readable name in %nm field first
+    const connectorName = connectorData['%nm'] || connectorData.nm || connectorData.human || connectorData.name || connectorId;
+
+    // Get auth type from connector level
+    const authType = connectorData.auth || null;
+
+    // Check if this connector has nested "calls" object
+    if (connectorData.calls && typeof connectorData.calls === 'object') {
+      // Drill into each call within this connector
+      for (const [callId, callData] of Object.entries(connectorData.calls)) {
+        if (!callData || typeof callData !== 'object') continue;
+
+        const call = extractCallDetails(callData, callId, connectorName, authType);
+        calls.push(call);
+      }
+    } else {
+      // This might be a flat structure - treat connectorData as the call itself
+      const call = extractCallDetails(connectorData, connectorId, null, authType);
+      if (call.url || call.headers.length > 0 || call.parameters.length > 0) {
+        calls.push(call);
+      }
+    }
+  }
+
+  return calls;
+}
+
+// Extract details from a single API call object
+function extractCallDetails(callData, callId, parentName, authType) {
+  // Look for human-readable name in various fields including %nm
+  const humanName = callData['%nm'] || callData.nm || callData.human || callData.name || callId;
+
+  const call = {
+    id: callId,
+    name: humanName,
+    parentName: parentName,
+    authType: authType,
+    url: callData.url || callData.base_url || callData.api_url || '',
+    method: callData.method || callData.http_method || callData.request_type || 'GET',
+    headers: [],
+    parameters: [],
+    body: callData.body || callData.request_body || null,
+    rawData: callData
+  };
+
+  // Extract headers from various possible formats
+  const headerSources = [
+    callData.headers,
+    callData.shared_headers,
+    callData.request_headers
+  ];
+
+  for (const source of headerSources) {
+    if (Array.isArray(source)) {
+      source.forEach(h => {
+        if (h && typeof h === 'object') {
+          const header = {
+            name: h['%k'] || h.key || h.name || h.header_name || h.k || '',
+            value: h['%v'] || h.value || h.private_key || h.header_value || h.v || '',
+            isPrivate: h.private === true || h.is_private === true || !!h.private_key,
+            rawData: h  // Keep the raw JSON object
+          };
+          call.headers.push(header);
+        }
+      });
+    } else if (source && typeof source === 'object') {
+      // Handle object format where keys are IDs and values contain %k, %v, private
+      Object.entries(source).forEach(([id, data]) => {
+        if (data && typeof data === 'object') {
+          call.headers.push({
+            name: data['%k'] || data.key || data.name || id,
+            value: data['%v'] || data.value || data.private_key || '',
+            isPrivate: data.private === true || false,
+            rawData: data
+          });
+        } else if (typeof data === 'string') {
+          call.headers.push({
+            name: id,
+            value: data,
+            isPrivate: false,
+            rawData: { [id]: data }
+          });
+        }
+      });
+    }
+  }
+
+  // Extract parameters from various possible formats
+  const paramSources = [
+    callData.parameters,
+    callData.params,
+    callData.query_params,
+    callData.url_params,
+    callData.shared_parameters,
+    callData.body_params,
+    callData.bodyParams,
+    callData.body_parameters
+  ];
+
+  for (const source of paramSources) {
+    if (Array.isArray(source)) {
+      source.forEach(p => {
+        if (p && typeof p === 'object') {
+          const param = {
+            name: p['%k'] || p.key || p.name || p.param_name || p.k || '',
+            value: p['%v'] || p.value || p.private_key || p.default_value || p.v || '',
+            isPrivate: p.private === true || p.is_private === true || !!p.private_key,
+            type: p.type || p.param_type || '',
+            rawData: p  // Keep the raw JSON object
+          };
+          call.parameters.push(param);
+        }
+      });
+    } else if (source && typeof source === 'object') {
+      // Handle object format where keys are IDs and values contain %k, %v, private
+      Object.entries(source).forEach(([id, data]) => {
+        if (data && typeof data === 'object') {
+          call.parameters.push({
+            name: data['%k'] || data.key || data.name || id,
+            value: data['%v'] || data.value || data.private_key || '',
+            isPrivate: data.private === true || false,
+            rawData: data
+          });
+        } else if (typeof data === 'string') {
+          call.parameters.push({
+            name: id,
+            value: data,
+            isPrivate: false,
+            rawData: { [id]: data }
+          });
+        }
+      });
+    }
+  }
+
+  // Look for any field that might contain sensitive data at the call level
+  const sensitiveKeywords = ['key', 'token', 'secret', 'auth', 'password', 'credential', 'api_key', 'apikey'];
+  for (const [key, value] of Object.entries(callData)) {
+    if (typeof value === 'string' && value.length > 0) {
+      const keyLower = key.toLowerCase();
+      if (sensitiveKeywords.some(kw => keyLower.includes(kw))) {
+        const existsInHeaders = call.headers.some(h => h.value === value);
+        const existsInParams = call.parameters.some(p => p.value === value);
+        if (!existsInHeaders && !existsInParams) {
+          call.parameters.push({ name: key, value: value, isPrivate: true });
+        }
+      }
+    }
+  }
+
+  return call;
+}
+
+// Render a single API call card
+function renderApiCall(call, index) {
+  const methodClass = (call.method || 'get').toLowerCase();
+  const hasHeaders = call.headers && call.headers.length > 0;
+  const hasParams = call.parameters && call.parameters.length > 0;
+  const hasBody = call.body && (typeof call.body === 'string' ? call.body.length > 0 : Object.keys(call.body).length > 0);
+
+  // Use human-readable name for display
+  const displayName = call.name || '(unnamed call)';
+
+  // Check if this call has a security finding
+  const finding = getSecurityFinding(call.parentName, call.name);
+  const securityIndicator = finding ? renderSecurityIndicator(finding) : '';
+
+  let html = `
+    <div class="api-call-card ${finding ? 'has-security-issue risk-' + finding.risk.toLowerCase() : ''}">
+      <div class="api-call-header" onclick="toggleApiCallDetails('api-call-${index}')">
+        <div class="api-call-title">
+          <span class="http-method method-${methodClass}">${escapeHtml((call.method || 'GET').toUpperCase())}</span>
+          <span class="api-call-name">${escapeHtml(displayName)}</span>
+        </div>
+        <div class="api-call-header-right">
+          ${securityIndicator}
+          <span class="expand-icon">&#9660;</span>
+        </div>
+      </div>
+      <div class="api-call-details" id="api-call-${index}">
+  `;
+
+  // URL
+  if (call.url) {
+    html += `
+      <div class="api-call-section">
+        <div class="section-label">URL</div>
+        <div class="api-url" onclick="copyToClipboard('${escapeJsString(call.url)}')" title="Click to copy">${escapeHtml(call.url)}</div>
+      </div>
+    `;
+  }
+
+  // Headers - simple key: value list (only exposed ones, not private)
+  const exposedHeaders = call.headers.filter(h => !h.isPrivate && h.rawData?.private !== true);
+  if (exposedHeaders.length > 0) {
+    html += renderCompactKeyValues('Headers', exposedHeaders);
+  }
+
+  // Parameters - simple key: value list (only exposed ones, not private)
+  const exposedParams = call.parameters.filter(p => !p.isPrivate && p.rawData?.private !== true);
+  if (exposedParams.length > 0) {
+    html += renderCompactKeyValues('Params', exposedParams);
+  }
+
+  // Body
+  if (hasBody) {
+    const bodyStr = typeof call.body === 'string' ? call.body : JSON.stringify(call.body, null, 2);
+    html += `
+      <div class="api-call-section">
+        <div class="section-label">Request Body</div>
+        <pre class="request-body">${escapeHtml(bodyStr)}</pre>
+      </div>
+    `;
+  }
+
+  html += '</div></div>';
+  return html;
+}
+
+// Generate unique key for an API call
+function getApiCallKey(connectorName, callName) {
+  return `${connectorName || ''}|${callName || ''}`;
+}
+
+// Auto-detect security issues from URL and headers
+function detectAutoSecurityIssues(call) {
+  const issues = [];
+
+  // Check URL for API keys/tokens
+  if (call.url) {
+    const urlLower = call.url.toLowerCase();
+    const url = call.url;
+
+    // Common patterns for API keys in URLs
+    const urlPatterns = [
+      { pattern: /[?&](api[_-]?key|apikey)=([^&]+)/i, type: 'API Key in URL' },
+      { pattern: /[?&](access[_-]?token|token)=([^&]+)/i, type: 'Access Token in URL' },
+      { pattern: /[?&](secret|secret[_-]?key)=([^&]+)/i, type: 'Secret Key in URL' },
+      { pattern: /[?&](auth|authorization)=([^&]+)/i, type: 'Auth Token in URL' },
+      { pattern: /[?&](password|passwd|pwd)=([^&]+)/i, type: 'Password in URL' },
+      { pattern: /[?&](client[_-]?secret)=([^&]+)/i, type: 'Client Secret in URL' },
+    ];
+
+    for (const { pattern, type } of urlPatterns) {
+      const match = url.match(pattern);
+      if (match && match[2] && match[2].length > 0) {
+        issues.push({
+          type: type,
+          location: 'URL',
+          value: match[2]
+        });
+      }
+    }
+  }
+
+  // Check for exposed auth headers
+  if (call.headers && call.headers.length > 0) {
+    for (const header of call.headers) {
+      const name = (header.name || '').toLowerCase();
+      const value = header.value || header.rawData?.['%v'] || '';
+      const isPrivate = header.isPrivate || header.rawData?.private === true;
+
+      if (!isPrivate && value.length > 0) {
+        if (name.includes('authorization') || name === 'auth') {
+          issues.push({
+            type: 'Exposed Authorization Header',
+            location: 'Header',
+            value: value.substring(0, 50) + (value.length > 50 ? '...' : '')
+          });
+        } else if (name.includes('api-key') || name.includes('apikey') || name === 'x-api-key') {
+          issues.push({
+            type: 'Exposed API Key Header',
+            location: 'Header',
+            value: value.substring(0, 50) + (value.length > 50 ? '...' : '')
+          });
+        } else if (name.includes('token') && !name.includes('content')) {
+          issues.push({
+            type: 'Exposed Token Header',
+            location: 'Header',
+            value: value.substring(0, 50) + (value.length > 50 ? '...' : '')
+          });
+        }
+      }
+    }
+  }
+
+  if (issues.length === 0) return null;
+
+  // Return a finding object
+  return {
+    risk: 'critical',
+    issue: issues.map(i => i.type).join(', '),
+    recommendation: 'Move sensitive credentials to server-side. Mark these values as "Private" in Bubble.',
+    isAutoDetected: true,
+    details: issues
+  };
+}
+
+// Get security finding for a specific API call (checks manual override first)
+function getSecurityFinding(connectorName, callName) {
+  const key = getApiCallKey(connectorName, callName);
+
+  // Check manual override first
+  if (state.manualApiOverrides[key]) {
+    return state.manualApiOverrides[key];
+  }
+
+  if (!state.apiExposureAnalysis || !state.apiExposureAnalysis.findings) {
+    return null;
+  }
+
+  // Find a finding that matches this connector/call
+  return state.apiExposureAnalysis.findings.find(f => {
+    const connectorMatch = !f.connector ||
+      f.connector.toLowerCase() === (connectorName || '').toLowerCase() ||
+      (connectorName || '').toLowerCase().includes(f.connector.toLowerCase());
+    const callMatch = !f.call ||
+      f.call.toLowerCase() === (callName || '').toLowerCase() ||
+      (callName || '').toLowerCase().includes(f.call.toLowerCase());
+    return connectorMatch && callMatch;
+  });
+}
+
+// Check if an API call has a manual override
+function hasManualApiOverride(connectorName, callName) {
+  const key = getApiCallKey(connectorName, callName);
+  return !!state.manualApiOverrides[key];
+}
+
+// Set manual severity for an API call
+function setManualApiSeverity(connectorName, callName, risk) {
+  const key = getApiCallKey(connectorName, callName);
+
+  if (risk === null) {
+    // Remove override
+    delete state.manualApiOverrides[key];
+  } else {
+    state.manualApiOverrides[key] = {
+      risk: risk,
+      issue: 'Manually flagged',
+      recommendation: 'Review this API call for security concerns',
+      isManual: true
+    };
+  }
+
+  renderApiKeysList();
+}
+
+// Cycle through severity levels for an API call
+function cycleApiSeverity(connectorName, callName) {
+  const key = getApiCallKey(connectorName, callName);
+  const current = state.manualApiOverrides[key];
+  const aiFinding = getAiSecurityFinding(connectorName, callName);
+
+  // Cycle: none -> critical -> high -> medium -> none (or back to AI if exists)
+  let nextRisk = null;
+
+  if (!current) {
+    nextRisk = 'critical';
+  } else if (current.risk === 'critical') {
+    nextRisk = 'high';
+  } else if (current.risk === 'high') {
+    nextRisk = 'medium';
+  } else {
+    nextRisk = null; // Remove override
+  }
+
+  setManualApiSeverity(connectorName, callName, nextRisk);
+}
+
+// Get AI-only security finding (ignoring manual overrides)
+function getAiSecurityFinding(connectorName, callName) {
+  if (!state.apiExposureAnalysis || !state.apiExposureAnalysis.findings) {
+    return null;
+  }
+
+  return state.apiExposureAnalysis.findings.find(f => {
+    const connectorMatch = !f.connector ||
+      f.connector.toLowerCase() === (connectorName || '').toLowerCase() ||
+      (connectorName || '').toLowerCase().includes(f.connector.toLowerCase());
+    const callMatch = !f.call ||
+      f.call.toLowerCase() === (callName || '').toLowerCase() ||
+      (callName || '').toLowerCase().includes(f.call.toLowerCase());
+    return connectorMatch && callMatch;
+  });
+}
+
+// Render security indicator for a finding with hover tooltip
+function renderSecurityIndicator(finding, connectorName, callName) {
+  const risk = (finding.risk || 'unknown').toLowerCase();
+  const recommendation = finding.recommendation || 'No fix available';
+  const isManual = finding.isManual;
+  const isAutoDetected = finding.isAutoDetected;
+  const extraClass = isManual ? 'manual-override' : '';
+
+  let sourceLabel = '';
+  if (isManual) sourceLabel = ' (manual)';
+  else if (isAutoDetected) sourceLabel = ' (auto)';
+
+  return `
+    <div class="security-indicator-wrapper ${extraClass}" onclick="cycleApiSeverity('${escapeHtml(connectorName || '')}', '${escapeHtml(callName || '')}'); event.stopPropagation();" title="Click to change severity">
+      <span class="security-indicator risk-${risk}">!</span>
+      <div class="security-tooltip">
+        <div class="tooltip-header">${escapeHtml((finding.risk || 'ISSUE').toUpperCase())}${sourceLabel}</div>
+        <div class="tooltip-issue">${escapeHtml(finding.issue || '')}</div>
+        <div class="tooltip-fix"><strong>Fix:</strong> ${escapeHtml(recommendation)}</div>
+        <div class="tooltip-hint">Click to change severity</div>
+      </div>
+    </div>
+  `;
+}
+
+// Render add severity button for calls without findings
+function renderAddSeverityButton(connectorName, callName) {
+  return `
+    <div class="add-severity-btn" onclick="cycleApiSeverity('${escapeHtml(connectorName || '')}', '${escapeHtml(callName || '')}'); event.stopPropagation();" title="Add security flag">
+      <span class="add-severity-icon">+</span>
+    </div>
+  `;
+}
+
+// Render a compact API call (always expanded, no nesting)
+function renderCompactApiCall(call, index) {
+  const methodClass = (call.method || 'get').toLowerCase();
+
+  // Check if this call has a security finding (manual > auto-detected > AI)
+  const manualOrAiFinding = getSecurityFinding(call.parentName, call.name);
+  const autoDetected = detectAutoSecurityIssues(call);
+  const finding = manualOrAiFinding || autoDetected;
+
+  const securityIndicator = finding
+    ? renderSecurityIndicator(finding, call.parentName, call.name)
+    : renderAddSeverityButton(call.parentName, call.name);
+
+  // Build the display name with connector prefix
+  const displayName = call.parentName ? `${call.parentName} → ${call.name}` : call.name;
+
+  // Format auth type for display
+  const authBadge = call.authType ? `<span class="auth-type-badge">${escapeHtml(call.authType)}</span>` : '';
+
+  // Filter exposed headers and params
+  const exposedHeaders = call.headers.filter(h => !h.isPrivate && h.rawData?.private !== true);
+  const exposedParams = call.parameters.filter(p => !p.isPrivate && p.rawData?.private !== true);
+
+  // Only show if there are exposed items
+  if (exposedHeaders.length === 0 && exposedParams.length === 0 && !finding) {
+    return ''; // Skip calls with nothing exposed
+  }
+
+  const callId = `api-call-${index}`;
+  const hasDetails = exposedHeaders.length > 0 || exposedParams.length > 0;
+
+  let html = `
+    <div class="compact-api-call" id="${callId}">
+      <div class="compact-call-header ${hasDetails ? 'clickable' : ''}" ${hasDetails ? `onclick="toggleApiCallDetails('${callId}')"` : ''}>
+        <span class="http-method method-${methodClass}">${escapeHtml((call.method || 'GET').toUpperCase())}</span>
+        ${authBadge}
+        <span class="compact-call-name">${escapeHtml(displayName)}</span>
+        ${hasDetails ? `<span class="expand-indicator">▶</span>` : ''}
+        ${securityIndicator}
+      </div>
+  `;
+
+  if (call.url) {
+    html += `<div class="compact-url">${escapeHtml(call.url)}</div>`;
+  }
+
+  if (hasDetails) {
+    html += `<div class="compact-call-details collapsed">`;
+
+    if (exposedHeaders.length > 0) {
+      html += renderCompactTable('Headers', exposedHeaders);
+    }
+
+    if (exposedParams.length > 0) {
+      html += renderCompactTable('Parameters', exposedParams);
+    }
+
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+// Toggle API call details visibility
+function toggleApiCallDetails(callId) {
+  const callEl = document.getElementById(callId);
+  if (!callEl) return;
+
+  const details = callEl.querySelector('.compact-call-details');
+  const indicator = callEl.querySelector('.expand-indicator');
+
+  if (details) {
+    details.classList.toggle('collapsed');
+    if (indicator) {
+      indicator.textContent = details.classList.contains('collapsed') ? '▶' : '▼';
+    }
+  }
+}
+
+// Render compact key-value pairs inline
+function renderCompactKeyValues(label, items) {
+  let html = `<div class="compact-section"><span class="compact-label">${label}:</span>`;
+
+  items.forEach((item, i) => {
+    const key = item.rawData?.['%k'] || item.name || '';
+    const value = item.rawData?.['%v'] || item.value || '';
+    const separator = i < items.length - 1 ? ', ' : '';
+
+    html += `<span class="compact-kv" onclick="copyToClipboard('${escapeJsString(value)}')" title="Click to copy">`;
+    html += `<span class="compact-key">${escapeHtml(key)}</span>=<span class="compact-val">${escapeHtml(truncateValue(value, 50))}</span>`;
+    html += `</span>${separator}`;
+  });
+
+  html += '</div>';
+  return html;
+}
+
+// Render a compact table for headers/params
+function renderCompactTable(label, items) {
+  if (!items || items.length === 0) return '';
+
+  let html = `
+    <div class="compact-table-section">
+      <div class="compact-table-label">${label}</div>
+      <table class="compact-table">
+        <thead>
+          <tr>
+            <th>Key</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  items.forEach(item => {
+    const key = item.rawData?.['%k'] || item.name || '';
+    const value = item.rawData?.['%v'] || item.value || '';
+
+    html += `
+      <tr onclick="copyToClipboard('${escapeJsString(value)}')" title="Click to copy">
+        <td class="compact-table-key">${escapeHtml(key)}</td>
+        <td class="compact-table-value">${escapeHtml(value)}</td>
+      </tr>
+    `;
+  });
+
+  html += '</tbody></table></div>';
+  return html;
+}
+
+// Truncate long values for display
+function truncateValue(value, maxLen) {
+  if (!value || value.length <= maxLen) return value;
+  return value.substring(0, maxLen) + '...';
+}
+
+// Render a simple key: value list
+function renderKeyValueList(label, items) {
+  if (!items || items.length === 0) return '';
+
+  let html = `
+    <div class="api-call-section">
+      <div class="section-label">${label} <span class="count-badge-small">${items.length}</span></div>
+      <div class="key-value-list">
+  `;
+
+  items.forEach(item => {
+    const key = item.rawData?.['%k'] || item.name || '';
+    const value = item.rawData?.['%v'] || item.value || '';
+
+    html += `
+      <div class="kv-item" onclick="copyToClipboard('${escapeJsString(value)}')" title="Click to copy">
+        <span class="kv-key">${escapeHtml(key)}</span>
+        <span class="kv-value">${escapeHtml(value)}</span>
+      </div>
+    `;
+  });
+
+  html += '</div></div>';
+  return html;
+}
+
+// Render a data table with dynamic columns based on rawData keys
+function renderDataTable(label, items) {
+  if (!items || items.length === 0) return '';
+
+  // Collect all unique keys from rawData across all items
+  const allKeys = new Set();
+  items.forEach(item => {
+    if (item.rawData && typeof item.rawData === 'object') {
+      Object.keys(item.rawData).forEach(key => allKeys.add(key));
+    }
+  });
+
+  // Convert to array and sort (put common keys first)
+  const priorityKeys = ['%k', '%v', 'key', 'value', 'name', 'private', 'optional', 'type'];
+  const sortedKeys = Array.from(allKeys).sort((a, b) => {
+    const aIdx = priorityKeys.indexOf(a);
+    const bIdx = priorityKeys.indexOf(b);
+    if (aIdx !== -1 && bIdx !== -1) return aIdx - bIdx;
+    if (aIdx !== -1) return -1;
+    if (bIdx !== -1) return 1;
+    return a.localeCompare(b);
+  });
+
+  let html = `
+    <div class="api-call-section">
+      <div class="section-label">${label} <span class="count-badge-small">${items.length}</span></div>
+      <div class="table-scroll-container">
+        <table class="api-table">
+          <thead>
+            <tr>
+  `;
+
+  // Add header columns
+  sortedKeys.forEach(key => {
+    html += `<th>${escapeHtml(key)}</th>`;
+  });
+
+  html += `
+            </tr>
+          </thead>
+          <tbody>
+  `;
+
+  // Add data rows
+  items.forEach(item => {
+    const isSensitive = item.isPrivate || item.rawData?.private === true;
+    html += `<tr class="${isSensitive ? 'sensitive' : ''}">`;
+
+    sortedKeys.forEach(key => {
+      const value = item.rawData ? item.rawData[key] : undefined;
+      let displayValue = '';
+
+      if (value === undefined || value === null) {
+        displayValue = '';
+      } else if (typeof value === 'boolean') {
+        displayValue = value ? 'true' : 'false';
+      } else if (typeof value === 'object') {
+        displayValue = JSON.stringify(value);
+      } else {
+        displayValue = String(value);
+      }
+
+      const cellClass = (key === '%v' || key === 'value') ? 'table-value' : '';
+      html += `<td class="${cellClass}" onclick="copyToClipboard('${escapeJsString(displayValue)}')" title="Click to copy">${escapeHtml(displayValue)}</td>`;
+    });
+
+    html += '</tr>';
+  });
+
+  html += '</tbody></table></div></div>';
+  return html;
+}
+
+// Check if a value looks like a sensitive credential
+function looksLikeSensitiveValue(value) {
+  if (!value || typeof value !== 'string') return false;
+  // Check for common API key patterns
+  if (value.length >= 20 && /^[a-zA-Z0-9_\-]+$/.test(value)) return true;
+  if (value.startsWith('sk_') || value.startsWith('pk_')) return true;
+  if (value.startsWith('Bearer ')) return true;
+  if (value.startsWith('Basic ')) return true;
+  return false;
+}
+
+// Toggle risk level filter (multi-select)
+function toggleRiskFilter(level) {
+  state.riskFilters[level] = !state.riskFilters[level];
+  renderApiKeysList();
+}
+
+// Toggle connector group visibility
+function toggleConnectorGroup(id) {
+  const group = document.getElementById(id);
+  if (!group) return;
+
+  const header = group.previousElementSibling;
+  if (group.classList.contains('expanded')) {
+    group.classList.remove('expanded');
+    header.classList.add('collapsed');
+  } else {
+    group.classList.add('expanded');
+    header.classList.remove('collapsed');
+  }
+}
+
+// Format key name for display (extract meaningful part)
+function formatKeyName(name) {
+  // Remove long numeric prefixes like "1504096531847x758150745130270700_"
+  const match = name.match(/^\d+x\d+_(.+)$/);
+  if (match) {
+    return match[1];
+  }
+  return name;
+}
+
+// Render a collapsible data section
+function renderDataSection(title, data, id) {
+  const jsonStr = JSON.stringify(data, null, 2);
+  const preview = jsonStr.length > 200 ? jsonStr.substring(0, 200) + '...' : jsonStr;
+
+  return `
+    <div class="data-section-item" onclick="toggleDataSection('${id}')">
+      <div class="data-section-header">
+        <span class="data-section-title">${escapeHtml(title)}</span>
+        <span class="expand-icon">&#9660;</span>
+      </div>
+      <div class="data-section-content" id="${id}">
+        <pre class="data-json">${escapeHtml(jsonStr)}</pre>
+      </div>
+    </div>
+  `;
+}
+
+// Toggle data section visibility
+function toggleDataSection(sectionId) {
+  const content = document.getElementById(sectionId);
+  if (!content) return;
+
+  const item = content.closest('.data-section-item');
+
+  if (content.classList.contains('expanded')) {
+    content.classList.remove('expanded');
+    item.classList.remove('expanded');
+  } else {
+    content.classList.add('expanded');
+    item.classList.add('expanded');
+  }
+}
+
+// Toggle console message details
+function toggleConsoleDetails(msgId) {
+  const details = document.getElementById(msgId);
+  if (!details) return;
+
+  const item = details.closest('.console-message-item');
+
+  if (details.classList.contains('expanded')) {
+    details.classList.remove('expanded');
+    item.classList.remove('expanded');
+  } else {
+    details.classList.add('expanded');
+    item.classList.add('expanded');
+  }
+}
+
+// Copy to clipboard helper
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    console.error('Failed to copy:', err);
   }
 }
 
