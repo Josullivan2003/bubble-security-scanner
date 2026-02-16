@@ -1860,11 +1860,19 @@ function renderEndpointsList() {
       const authClass = authLevel === 'none' ? 'no-auth-endpoint' : (authLevel === 'admin' ? 'admin-auth-endpoint' : '');
       const indicatorClass = authLevel === 'none' ? 'critical' : (authLevel === 'admin' ? 'admin' : 'warning');
 
+      // Admin endpoints get a tick, others get exclamation mark
+      const getIndicator = () => {
+        if (authLevel === 'admin') {
+          return `<span class="secure-indicator" title="Admin access required">✓</span>`;
+        }
+        return workflow.isCallable ? `<span class="callable-indicator ${indicatorClass}" title="All required data is available">!</span>` : '';
+      };
+
       html += `
         <div class="endpoint-item ${authClass} ${workflow.isCallable ? 'callable' : ''}" onclick="toggleEndpointDetails('${workflowId}')">
           <div class="endpoint-header">
             <div class="endpoint-main">
-              ${workflow.isCallable ? `<span class="callable-indicator ${indicatorClass}" title="All required data is available">!</span>` : ''}
+              ${getIndicator()}
               <span class="endpoint-path">/api/1.1/wf/${workflow.name}</span>
               ${hasParams ? `<span class="expand-icon">&#9660;</span>` : ''}
             </div>
