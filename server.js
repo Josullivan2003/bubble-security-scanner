@@ -792,9 +792,18 @@ app.post('/api/workflows', async (req, res) => {
           p.type.startsWith('custom.') || p.type === 'user'
         );
 
+        // Parse auth level: 'none' | 'user' | 'admin'
+        let authLevel = 'user'; // default: logged in user required
+        if (wf.auth_unecessary === true) {
+          authLevel = 'none';
+        } else if (wf.auth_unecessary === 'admin_only') {
+          authLevel = 'admin';
+        }
+
         return {
           name: wf.endpoint,
-          authRequired: !wf.auth_unecessary,
+          authRequired: wf.auth_unecessary !== true,
+          authLevel, // 'none' | 'user' | 'admin'
           isWebhook,
           parameters,
           // Risk factors from endpoint name analysis

@@ -38,6 +38,7 @@ let state = {
     medium: false
   },
   manualApiOverrides: {},         // Manual API call severity: { "connectorName|callName": { risk, issue } }
+  apiKeysSearch: '',              // Search query for API keys tab
 };
 
 // Initialize
@@ -1835,26 +1836,40 @@ function renderEndpointsList() {
     html += `<div class="endpoints-list">`;
     filteredWorkflows.forEach(workflow => {
       const workflowId = workflow.name.replace(/[^a-zA-Z0-9]/g, '_');
-      const noAuth = !workflow.authRequired;
+      const authLevel = workflow.authLevel || (workflow.authRequired ? 'user' : 'none');
       const hasParams = workflow.parameters.length > 0;
 
+      // Get auth description based on level
+      const getAuthDescription = (level, isCallable) => {
+        if (level === 'none') {
+          return isCallable
+            ? `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required, and all parameters exposed.</span>`
+            : `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required.</span>`;
+        } else if (level === 'admin') {
+          return isCallable
+            ? `<span class="auth-description warning-admin">Admin access required.</span> <span class="auth-description">All parameters exposed.</span>`
+            : `<span class="auth-description warning-admin">Admin access required.</span>`;
+        } else {
+          return isCallable
+            ? `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required, but all parameters exposed.</span>`
+            : `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required.</span>`;
+        }
+      };
+
+      // Determine CSS class and indicator style based on auth level
+      const authClass = authLevel === 'none' ? 'no-auth-endpoint' : (authLevel === 'admin' ? 'admin-auth-endpoint' : '');
+      const indicatorClass = authLevel === 'none' ? 'critical' : (authLevel === 'admin' ? 'admin' : 'warning');
+
       html += `
-        <div class="endpoint-item ${noAuth ? 'no-auth-endpoint' : ''} ${workflow.isCallable ? 'callable' : ''}" onclick="toggleEndpointDetails('${workflowId}')">
+        <div class="endpoint-item ${authClass} ${workflow.isCallable ? 'callable' : ''}" onclick="toggleEndpointDetails('${workflowId}')">
           <div class="endpoint-header">
             <div class="endpoint-main">
-              ${workflow.isCallable ? `<span class="callable-indicator ${noAuth ? 'critical' : 'warning'}" title="All required data is available">!</span>` : ''}
+              ${workflow.isCallable ? `<span class="callable-indicator ${indicatorClass}" title="All required data is available">!</span>` : ''}
               <span class="endpoint-path">/api/1.1/wf/${workflow.name}</span>
               ${hasParams ? `<span class="expand-icon">&#9660;</span>` : ''}
             </div>
             <div class="endpoint-auth">
-              ${workflow.isCallable
-                ? (noAuth
-                    ? `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required, and all parameters exposed.</span>`
-                    : `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required, but all parameters exposed.</span>`)
-                : (noAuth
-                    ? `<span class="auth-description warning-critical">Anyone on the internet can run this.</span> <span class="auth-description">No authorisation required.</span>`
-                    : `<span class="auth-description warning-caution">Any logged-in user can run this.</span> <span class="auth-description">Authorisation required.</span>`)
-              }
+              ${getAuthDescription(authLevel, workflow.isCallable)}
             </div>
           </div>
           ${hasParams ? `
@@ -1992,6 +2007,12 @@ function renderApiKeysList() {
       html += '<div class="api-calls-container compact-view">';
       html += `<div class="api-calls-header">`;
       html += `<h3 class="section-title">API Calls <span class="count-badge">${apiCalls.length}</span></h3>`;
+      html += `<div class="api-header-right">`;
+      html += `<div class="api-keys-search">
+        <input type="text" id="apiKeysSearchInput" placeholder="Search APIs..." value="${escapeHtml(state.apiKeysSearch)}" oninput="handleApiKeysSearch(this.value)">
+        ${state.apiKeysSearch ? '<button class="search-clear-btn" onclick="clearApiKeysSearch()">&times;</button>' : ''}
+      </div>`;
+      html += `<button class="export-csv-btn" onclick="exportApiCallsCsv()" title="Export to CSV">Export CSV</button>`;
       html += `<div class="filter-toggles risk-filters">`;
 
       // Add risk level filter toggles
@@ -2017,9 +2038,17 @@ function renderApiKeysList() {
         `;
       }
 
-      html += '</div></div>';
+      html += '</div>'; // close filter-toggles
+      html += '</div></div>'; // close api-header-right and api-calls-header
 
-      apiCalls.forEach((call, index) => {
+      // Filter by search query
+      const searchQuery = state.apiKeysSearch.toLowerCase().trim();
+      let filteredCalls = apiCalls;
+      if (searchQuery) {
+        filteredCalls = apiCalls.filter(call => apiCallMatchesSearch(call, searchQuery));
+      }
+
+      filteredCalls.forEach((call, index) => {
         const riskLevel = getCallRiskLevel(call);
 
         // Apply risk filters (if any filter is active, only show matching risks)
@@ -2031,6 +2060,11 @@ function renderApiKeysList() {
 
         html += renderCompactApiCall(call, index);
       });
+
+      // Show no results message if search filtered everything
+      if (searchQuery && filteredCalls.length === 0) {
+        html += `<div class="search-no-results">No API calls match "${escapeHtml(state.apiKeysSearch)}"</div>`;
+      }
 
       html += '</div>';
     }
@@ -2181,7 +2215,7 @@ function extractCallDetails(callData, callId, parentName, authType) {
     method: callData.method || callData.http_method || callData.request_type || 'GET',
     headers: [],
     parameters: [],
-    body: callData.body || callData.request_body || null,
+    body: callData['%b3'] || callData.body || callData.request_body || null,
     rawData: callData
   };
 
@@ -2812,6 +2846,135 @@ function looksLikeSensitiveValue(value) {
 function toggleRiskFilter(level) {
   state.riskFilters[level] = !state.riskFilters[level];
   renderApiKeysList();
+}
+
+// Handle API keys search input
+function handleApiKeysSearch(query) {
+  state.apiKeysSearch = query;
+  renderApiKeysList();
+  // Restore focus and cursor position
+  const input = document.getElementById('apiKeysSearchInput');
+  if (input) {
+    input.focus();
+    input.setSelectionRange(query.length, query.length);
+  }
+}
+
+// Clear API keys search
+function clearApiKeysSearch() {
+  state.apiKeysSearch = '';
+  renderApiKeysList();
+  const input = document.getElementById('apiKeysSearchInput');
+  if (input) input.focus();
+}
+
+// Export API calls to CSV
+function exportApiCallsCsv() {
+  if (!state.apiKeysAnalysis || !state.apiKeysAnalysis.apiConnector2) {
+    alert('No API calls to export');
+    return;
+  }
+
+  const apiCalls = parseApiConnectorCalls(state.apiKeysAnalysis.apiConnector2);
+  if (apiCalls.length === 0) {
+    alert('No API calls to export');
+    return;
+  }
+
+  // CSV headers
+  const headers = ['Connector', 'Call Name', 'Method', 'URL', 'Auth Type', 'Authorization/Bearer Token', 'All Headers', 'Parameters', 'Request Body'];
+
+  // Build CSV rows
+  const rows = apiCalls.map(call => {
+    // Find bearer/authorization token specifically
+    const authHeader = call.headers.find(h =>
+      h.name.toLowerCase() === 'authorization' ||
+      h.name.toLowerCase().includes('bearer') ||
+      h.name.toLowerCase().includes('token') ||
+      h.name.toLowerCase().includes('api-key') ||
+      h.name.toLowerCase().includes('apikey')
+    );
+    const bearerToken = authHeader ? authHeader.value : '';
+
+    // Format ALL headers as key:value pairs (include everything)
+    const headersStr = call.headers
+      .map(h => `${h.name}: ${h.value}`)
+      .join('; ');
+
+    // Format ALL parameters as key:value pairs (include everything)
+    const paramsStr = call.parameters
+      .map(p => `${p.name}: ${p.value}`)
+      .join('; ');
+
+    // Include request body
+    const bodyStr = call.body ? (typeof call.body === 'string' ? call.body : JSON.stringify(call.body)) : '';
+
+    return [
+      call.parentName || '',
+      call.name || '',
+      call.method || 'GET',
+      call.url || '',
+      call.authType || 'None',
+      bearerToken,
+      headersStr,
+      paramsStr,
+      bodyStr
+    ];
+  });
+
+  // Escape CSV values
+  const escapeCsvValue = (val) => {
+    if (val === null || val === undefined) return '';
+    const str = String(val);
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  };
+
+  // Build CSV content
+  const csvContent = [
+    headers.map(escapeCsvValue).join(','),
+    ...rows.map(row => row.map(escapeCsvValue).join(','))
+  ].join('\n');
+
+  // Download file
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const filename = `api-calls-${state.appName || 'export'}-${new Date().toISOString().slice(0,10)}.csv`;
+
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+// Check if an API call matches the search query
+function apiCallMatchesSearch(call, query) {
+  // Search in call name
+  if (call.name && call.name.toLowerCase().includes(query)) return true;
+  // Search in parent/connector name
+  if (call.parentName && call.parentName.toLowerCase().includes(query)) return true;
+  // Search in URL
+  if (call.url && call.url.toLowerCase().includes(query)) return true;
+  // Search in method
+  if (call.method && call.method.toLowerCase().includes(query)) return true;
+  // Search in headers
+  if (call.headers && call.headers.some(h =>
+    (h.name && h.name.toLowerCase().includes(query)) ||
+    (h.value && h.value.toLowerCase().includes(query))
+  )) return true;
+  // Search in parameters
+  if (call.parameters && call.parameters.some(p =>
+    (p.name && p.name.toLowerCase().includes(query)) ||
+    (p.value && String(p.value).toLowerCase().includes(query))
+  )) return true;
+  // Search in body
+  if (call.body) {
+    const bodyStr = typeof call.body === 'string' ? call.body : JSON.stringify(call.body);
+    if (bodyStr.toLowerCase().includes(query)) return true;
+  }
+  return false;
 }
 
 // Toggle connector group visibility

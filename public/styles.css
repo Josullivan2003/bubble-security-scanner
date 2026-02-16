@@ -1505,6 +1505,14 @@ button:disabled {
   font-weight: 500;
 }
 
+.auth-description.warning-admin {
+  color: #22c55e;
+  font-weight: 500;
+}
+
+.admin-auth-endpoint {
+  border-left-color: #22c55e;
+}
 
 /* Callable endpoint indicator */
 .callable-indicator {
@@ -1528,6 +1536,20 @@ button:disabled {
 .callable-indicator.warning {
   background: #eab308;
   animation: pulse-warning 2s ease-in-out infinite;
+}
+
+.callable-indicator.admin {
+  background: #22c55e;
+  animation: pulse-admin 2s ease-in-out infinite;
+}
+
+@keyframes pulse-admin {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(34, 197, 94, 0);
+  }
 }
 
 @keyframes pulse-critical {
@@ -3312,10 +3334,93 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 0.75rem;
+  flex-wrap: wrap;
+  gap: 1rem;
 }
 
 .api-calls-header .section-title {
   margin: 0;
+  flex-shrink: 0;
+}
+
+.api-header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-left: auto;
+}
+
+.api-keys-search {
+  display: flex;
+  align-items: center;
+  position: relative;
+  width: 220px;
+  flex-shrink: 0;
+}
+
+.api-keys-search input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  padding-right: 2rem;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+
+.api-keys-search input:focus {
+  border-color: rgba(99, 102, 241, 0.8);
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+}
+
+.api-keys-search input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.export-csv-btn {
+  padding: 0.5rem 1rem;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.export-csv-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+.search-clear-btn {
+  position: absolute;
+  right: 0.5rem;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0.2rem;
+  line-height: 1;
+  transition: color 0.2s;
+}
+
+.search-clear-btn:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.search-no-results {
+  text-align: center;
+  padding: 2rem;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
 }
 
 .filter-toggles {
