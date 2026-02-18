@@ -516,6 +516,275 @@ app.post('/api/fetch-table', async (req, res) => {
   }
 });
 
+// Helper function to get just the app plan via Puppeteer (fast, lightweight)
+async function getAppPlan(url) {
+  let browser = null;
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      throw new Error('No browser available');
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 45000 });
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Try to wait for Bubble's app object
+    try {
+      await page.waitForFunction(() => window.appquery, { timeout: 10000 });
+    } catch (e) {
+      // Continue anyway
+    }
+
+    // Extract just the app plan
+    const appPlan = await page.evaluate(() => {
+      try {
+        if (window.appquery) {
+          if (typeof window.appquery.app_plan === 'function') {
+            const planData = window.appquery.app_plan();
+            if (planData) {
+              return {
+                id: planData.id || planData._id || null,
+                name: planData.name || planData.display || null,
+                raw: JSON.parse(JSON.stringify(planData))
+              };
+            }
+          } else if (window.appquery.app_plan) {
+            const planData = window.appquery.app_plan;
+            return {
+              id: planData.id || planData._id || null,
+              name: planData.name || planData.display || null,
+              raw: JSON.parse(JSON.stringify(planData))
+            };
+          }
+        }
+      } catch (e) {}
+      return null;
+    });
+
+    await browser.close();
+    return appPlan;
+
+  } catch (error) {
+    if (browser) await browser.close();
+    throw error;
+  }
+}
+
+// API endpoint to get just the Bubble app plan
+app.post('/api/app-plan', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  console.log(`[App Plan] Fetching plan for: ${url}`);
+
+  try {
+    const appPlan = await getAppPlan(url);
+
+    if (appPlan) {
+      console.log(`[App Plan] Found: ${appPlan.id}`);
+      res.json({ appPlan, url });
+    } else {
+      console.log(`[App Plan] Not found`);
+      res.json({ appPlan: null, url, message: 'App plan not found' });
+    }
+  } catch (error) {
+    console.error(`[App Plan] Error:`, error.message);
+    res.status(500).json({ error: 'Failed to fetch app plan', details: error.message });
+  }
+});
+
+// Helper function to scan app info (plan and pages) via Puppeteer
+async function scanAppInfo(url) {
+  let browser = null;
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      throw new Error('No browser available');
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 45000 });
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Try to wait for Bubble's app object
+    try {
+      await page.waitForFunction(() => window.app && window.app.settings, { timeout: 10000 });
+    } catch (e) {
+      // Continue anyway
+    }
+
+    // Extract app plan, pages, and editor URL
+    const extractedData = await page.evaluate(() => {
+      const result = { appPlan: null, pages: null, editorUrl: null };
+
+      // Extract app_plan from appquery
+      try {
+        if (window.appquery) {
+          if (typeof window.appquery.app_plan === 'function') {
+            const planData = window.appquery.app_plan();
+            if (planData) {
+              result.appPlan = {
+                id: planData.id || planData._id || null,
+                name: planData.name || planData.display || null,
+                raw: JSON.parse(JSON.stringify(planData))
+              };
+            }
+          } else if (window.appquery.app_plan) {
+            const planData = window.appquery.app_plan;
+            result.appPlan = {
+              id: planData.id || planData._id || null,
+              name: planData.name || planData.display || null,
+              raw: JSON.parse(JSON.stringify(planData))
+            };
+          }
+        }
+      } catch (e) {}
+
+      // Extract pages from app.%p3
+      try {
+        if (window.app && window.app['%p3']) {
+          result.pages = JSON.parse(JSON.stringify(window.app['%p3']));
+        }
+      } catch (e) {}
+
+      // Extract editor link
+      try {
+        if (window.appquery && typeof window.appquery.get_editor_link === 'function') {
+          result.editorUrl = window.appquery.get_editor_link();
+        }
+      } catch (e) {}
+
+      return result;
+    });
+
+    // Test page access
+    let pageAccessResults = [];
+    if (extractedData.pages) {
+      const baseUrl = new URL(url);
+      const pageNames = Object.values(extractedData.pages).map(p => p['%nm']).filter(Boolean);
+
+      for (const pageName of pageNames) {
+        const pageUrl = `${baseUrl.origin}/${pageName}`;
+        try {
+          let response;
+          try {
+            response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+          } catch (navError) {
+            if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            } else {
+              throw navError;
+            }
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1500));
+
+          const finalUrl = page.url();
+          const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
+          const redirected = finalPath !== pageName;
+
+          pageAccessResults.push({
+            page: pageName,
+            redirected: redirected,
+            redirectTarget: redirected ? finalPath || 'index' : null,
+            accessible: !redirected
+          });
+        } catch (e) {
+          pageAccessResults.push({
+            page: pageName,
+            error: e.message,
+            accessible: false
+          });
+        }
+      }
+    }
+
+    // Test editor URL access (use test version instead of live)
+    let editorAccess = null;
+    if (extractedData.editorUrl) {
+      // Change version=live to version=test for testing
+      const testEditorUrl = extractedData.editorUrl.replace('version=live', 'version=test');
+      try {
+        let response;
+        try {
+          response = await page.goto(testEditorUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+        } catch (navError) {
+          if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+            response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          } else {
+            throw navError;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Check for permission denied alert on the page
+        const permissionDenied = await page.evaluate(() => {
+          const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
+          return bodyText.includes('do not have permission') ||
+                 bodyText.includes('don\'t have permission') ||
+                 bodyText.includes('permission to view') ||
+                 bodyText.includes('access denied') ||
+                 bodyText.includes('not authorized');
+        });
+
+        const finalUrl = page.url();
+        const redirectedToLogin = finalUrl.includes('login') || finalUrl.includes('signin') || finalUrl.includes('auth');
+
+        editorAccess = {
+          url: testEditorUrl,
+          finalUrl: finalUrl,
+          accessible: !permissionDenied && !redirectedToLogin,
+          permissionDenied: permissionDenied,
+          redirectedToLogin: redirectedToLogin,
+          status: response ? response.status() : null
+        };
+      } catch (e) {
+        editorAccess = {
+          url: testEditorUrl,
+          error: e.message,
+          accessible: false
+        };
+      }
+    }
+
+    await browser.close();
+    return { appPlan: extractedData.appPlan, pageAccess: pageAccessResults, editorAccess: editorAccess };
+
+  } catch (error) {
+    if (browser) await browser.close();
+    throw error;
+  }
+}
+
 // Full audit endpoint - returns AI summary of sensitive data
 app.post('/api/audit', async (req, res) => {
   const { url, x, y } = req.body;
@@ -730,7 +999,22 @@ Max 4 tables, max 5 columns each, ordered by criticality. If risk is "none", tab
     summary.secure = summary.risk === 'none';
     console.log(`[Audit] Audit complete:`, JSON.stringify(summary));
 
-    res.json(summary);
+    // Step 5: Get app plan, page access, and editor access via Puppeteer
+    let appInfo = { appPlan: null, pageAccess: null, editorAccess: null };
+    try {
+      console.log(`[Audit] Scanning for app plan, pages, and editor...`);
+      appInfo = await scanAppInfo(url);
+      console.log(`[Audit] App plan: ${appInfo.appPlan?.id || 'not found'}, Pages: ${appInfo.pageAccess?.length || 0}, Editor: ${appInfo.editorAccess?.accessible ? 'ACCESSIBLE' : 'protected'}`);
+    } catch (puppeteerError) {
+      console.error(`[Audit] Puppeteer scan failed:`, puppeteerError.message);
+    }
+
+    res.json({
+      ...summary,
+      appPlan: appInfo.appPlan,
+      pageAccess: appInfo.pageAccess,
+      editorAccess: appInfo.editorAccess
+    });
   } catch (error) {
     console.error('[Audit] Error:', error);
     res.status(500).json({ error: 'Audit failed', details: error.message });
@@ -1141,6 +1425,10 @@ app.post('/api/scan-api-keys', async (req, res) => {
         apiKeys: apiKeys,
         apiConnector2: extractedData.apiConnector2,
         clientSafe: extractedData.clientSafe,
+        appPlan: null, // Not available via HTML fallback (requires JS execution)
+        pages: null, // Not available via HTML fallback (requires JS execution)
+        pageAccess: null, // Not available via HTML fallback (requires JS execution)
+        editorAccess: null, // Not available via HTML fallback (requires JS execution)
         scannedUrl: url,
         method: 'html-fallback',
         debug: diagnosticInfo
@@ -1175,9 +1463,67 @@ app.post('/api/scan-api-keys', async (req, res) => {
       const result = {
         clientSafe: null,
         apiConnector2: null,
+        appPlan: null,
         allKeys: [],
         debugInfo: {}
       };
+
+      // Try to extract app_plan from appquery
+      try {
+        result.debugInfo.hasAppquery = !!window.appquery;
+        if (window.appquery) {
+          result.debugInfo.appqueryKeys = Object.keys(window.appquery).slice(0, 20);
+          result.debugInfo.appPlanType = typeof window.appquery.app_plan;
+
+          // Try as function first
+          if (typeof window.appquery.app_plan === 'function') {
+            const planData = window.appquery.app_plan();
+            if (planData) {
+              result.appPlan = {
+                id: planData.id || planData._id || null,
+                name: planData.name || planData.display || null,
+                raw: JSON.parse(JSON.stringify(planData))
+              };
+            }
+          }
+          // Try as property
+          else if (window.appquery.app_plan) {
+            const planData = window.appquery.app_plan;
+            result.appPlan = {
+              id: planData.id || planData._id || null,
+              name: planData.name || planData.display || null,
+              raw: JSON.parse(JSON.stringify(planData))
+            };
+          }
+        }
+      } catch (e) {
+        result.debugInfo.appPlanError = e.message;
+      }
+
+      // Try to extract pages list from app.%p3
+      try {
+        result.debugInfo.hasApp = !!window.app;
+        if (window.app) {
+          result.debugInfo.appKeys = Object.keys(window.app).slice(0, 30);
+
+          // Look for pages in %p3 property
+          const pagesData = window.app['%p3'];
+          if (pagesData) {
+            result.pages = JSON.parse(JSON.stringify(pagesData));
+          }
+        }
+      } catch (e) {
+        result.debugInfo.pagesError = e.message;
+      }
+
+      // Try to extract editor link from appquery.get_editor_link()
+      try {
+        if (window.appquery && typeof window.appquery.get_editor_link === 'function') {
+          result.editorUrl = window.appquery.get_editor_link();
+        }
+      } catch (e) {
+        result.debugInfo.editorLinkError = e.message;
+      }
 
       // Helper to safely get nested property
       const safeGet = (obj, path) => {
@@ -1301,10 +1647,6 @@ app.post('/api/scan-api-keys', async (req, res) => {
     console.log(`[API Keys] apiConnector2 found:`, !!extractedData.apiConnector2);
     console.log(`[API Keys] Extracted ${extractedData.allKeys?.length || 0} keys from client_safe`);
 
-    // Close browser
-    await browser.close();
-    browser = null;
-
     // Format the keys for display
     const apiKeys = (extractedData.allKeys || []).map(key => {
       // Try to determine the key type from the name
@@ -1361,10 +1703,92 @@ app.post('/api/scan-api-keys', async (req, res) => {
       }
     }
 
+    // Log app plan info
+    // Log app plan info
+    if (extractedData.appPlan) {
+      console.log(`[API Keys] App plan found:`, JSON.stringify(extractedData.appPlan, null, 2));
+    } else {
+      console.log(`[API Keys] App plan not found`);
+    }
+
+    // Log pages info and extract page names (without testing access yet)
+    let pageNames = [];
+    if (extractedData.pages) {
+      pageNames = Object.values(extractedData.pages).map(p => p['%nm']).filter(Boolean);
+      console.log(`[API Keys] Pages found: ${pageNames.length}`);
+    } else {
+      console.log(`[API Keys] Pages not found`);
+    }
+
+    // Skip page access testing here - it's now done via streaming endpoint
+    const pageAccessResults = [];
+
+    // Test editor URL access if available (use test version instead of live)
+    let editorAccess = null;
+    if (extractedData.editorUrl) {
+      // Change version=live to version=test for testing
+      const testEditorUrl = extractedData.editorUrl.replace('version=live', 'version=test');
+      console.log(`[API Keys] Testing editor URL: ${testEditorUrl}`);
+      try {
+        let response;
+        try {
+          response = await page.goto(testEditorUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+        } catch (navError) {
+          if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+            response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          } else {
+            throw navError;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Check for permission denied alert on the page
+        const permissionDenied = await page.evaluate(() => {
+          const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
+          return bodyText.includes('do not have permission') ||
+                 bodyText.includes('don\'t have permission') ||
+                 bodyText.includes('permission to view') ||
+                 bodyText.includes('access denied') ||
+                 bodyText.includes('not authorized');
+        });
+
+        const finalUrl = page.url();
+        const redirectedToLogin = finalUrl.includes('login') || finalUrl.includes('signin') || finalUrl.includes('auth');
+
+        editorAccess = {
+          url: testEditorUrl,
+          finalUrl: finalUrl,
+          accessible: !permissionDenied && !redirectedToLogin,
+          permissionDenied: permissionDenied,
+          redirectedToLogin: redirectedToLogin,
+          status: response ? response.status() : null
+        };
+
+        console.log(`[API Keys] Editor: ${editorAccess.accessible ? 'ACCESSIBLE (security risk!)' : 'protected'} (permissionDenied: ${permissionDenied})`);
+      } catch (e) {
+        console.log(`[API Keys] Editor test error: ${e.message}`);
+        editorAccess = {
+          url: testEditorUrl,
+          error: e.message,
+          accessible: false
+        };
+      }
+    }
+
+    // Close browser before sending response
+    await browser.close();
+    browser = null;
+
     res.json({
       apiKeys: apiKeys,
       apiConnector2: extractedData.apiConnector2,
       clientSafe: extractedData.clientSafe,
+      appPlan: extractedData.appPlan,
+      pages: extractedData.pages,
+      pageNames: pageNames,  // List of page names for immediate display
+      pageAccess: pageAccessResults,
+      editorAccess: editorAccess,
       scannedUrl: url
     });
 
@@ -1379,6 +1803,191 @@ app.post('/api/scan-api-keys', async (req, res) => {
       error: 'Failed to scan for API keys',
       details: error.message
     });
+  }
+});
+
+// SSE endpoint for streaming page access tests
+app.get('/api/test-pages-stream', async (req, res) => {
+  const url = req.query.url;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  console.log(`[Page Stream] Starting page access tests for: ${url}`);
+
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+
+  const sendEvent = (eventType, data) => {
+    res.write(`event: ${eventType}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  let browser = null;
+
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      sendEvent('error', { message: 'No browser available' });
+      res.end();
+      return;
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 45000 });
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Extract page names
+    const pageNames = await page.evaluate(() => {
+      try {
+        if (window.app && window.app['%p3']) {
+          return Object.values(window.app['%p3']).map(p => p['%nm']).filter(Boolean);
+        }
+      } catch (e) {}
+      return [];
+    });
+
+    if (pageNames.length === 0) {
+      sendEvent('complete', { message: 'No pages found' });
+      await browser.close();
+      res.end();
+      return;
+    }
+
+    sendEvent('start', { totalPages: pageNames.length, pages: pageNames });
+
+    const baseUrl = new URL(url);
+
+    // Test each page and stream results
+    for (let i = 0; i < pageNames.length; i++) {
+      const pageName = pageNames[i];
+      const pageUrl = `${baseUrl.origin}/${pageName}`;
+
+      try {
+        let response;
+        try {
+          response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+        } catch (navError) {
+          if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+            response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          } else {
+            throw navError;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        const finalUrl = page.url();
+        const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
+        const redirected = finalPath !== pageName;
+        const redirectTarget = redirected ? finalPath || 'index' : null;
+
+        sendEvent('pageResult', {
+          index: i,
+          page: pageName,
+          requestedUrl: pageUrl,
+          finalUrl: finalUrl,
+          redirected: redirected,
+          redirectTarget: redirectTarget,
+          status: response ? response.status() : null,
+          accessible: !redirected
+        });
+
+        console.log(`[Page Stream] ${i + 1}/${pageNames.length} - ${pageName}: ${redirected ? `redirected to ${redirectTarget}` : 'accessible'}`);
+
+      } catch (e) {
+        sendEvent('pageResult', {
+          index: i,
+          page: pageName,
+          requestedUrl: pageUrl,
+          error: e.message,
+          accessible: false
+        });
+        console.log(`[Page Stream] ${i + 1}/${pageNames.length} - ${pageName}: error - ${e.message}`);
+      }
+    }
+
+    // Test editor access
+    const editorUrl = await page.evaluate(() => {
+      try {
+        if (window.appquery && typeof window.appquery.get_editor_link === 'function') {
+          return window.appquery.get_editor_link();
+        }
+      } catch (e) {}
+      return null;
+    });
+
+    if (editorUrl) {
+      const testEditorUrl = editorUrl.replace('version=live', 'version=test');
+      try {
+        let response;
+        try {
+          response = await page.goto(testEditorUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+        } catch (navError) {
+          if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+            response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          } else {
+            throw navError;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        const permissionDenied = await page.evaluate(() => {
+          const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
+          return bodyText.includes('do not have permission') ||
+                 bodyText.includes('don\'t have permission') ||
+                 bodyText.includes('permission to view') ||
+                 bodyText.includes('access denied') ||
+                 bodyText.includes('not authorized');
+        });
+
+        const finalUrl = page.url();
+        const redirectedToLogin = finalUrl.includes('login') || finalUrl.includes('signin') || finalUrl.includes('auth');
+
+        sendEvent('editorResult', {
+          url: testEditorUrl,
+          finalUrl: finalUrl,
+          accessible: !permissionDenied && !redirectedToLogin,
+          permissionDenied: permissionDenied,
+          redirectedToLogin: redirectedToLogin,
+          status: response ? response.status() : null
+        });
+      } catch (e) {
+        sendEvent('editorResult', {
+          url: testEditorUrl,
+          error: e.message,
+          accessible: false
+        });
+      }
+    }
+
+    sendEvent('complete', { message: 'All pages tested' });
+
+    await browser.close();
+    res.end();
+
+  } catch (error) {
+    console.error('[Page Stream] Error:', error);
+    sendEvent('error', { message: error.message });
+    if (browser) await browser.close();
+    res.end();
   }
 });
 

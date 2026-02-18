@@ -1596,6 +1596,7 @@ function switchTab(tabName) {
   document.getElementById('tablesPanel').classList.toggle('hidden', tabName !== 'tables');
   document.getElementById('endpointsPanel').classList.toggle('hidden', tabName !== 'endpoints');
   document.getElementById('keysPanel').classList.toggle('hidden', tabName !== 'keys');
+  document.getElementById('pagesPanel').classList.toggle('hidden', tabName !== 'pages');
 
   // Render appropriate filter toggle
   renderTabFilter();
@@ -1623,6 +1624,18 @@ function switchTab(tabName) {
       document.getElementById('keysLoading').classList.remove('hidden');
     } else if (state.bubbleUrl && !state.apiKeysLoading) {
       // Trigger scan if we have a URL but haven't scanned yet
+      scanApiKeys();
+    }
+  }
+
+  // If switching to pages, show current state or trigger scan
+  if (tabName === 'pages') {
+    if (state.apiKeysAnalysis && state.apiKeysAnalysis.pageAccess) {
+      renderPagesList();
+    } else if (state.apiKeysLoading) {
+      document.getElementById('pagesLoading').classList.remove('hidden');
+    } else if (state.bubbleUrl && !state.apiKeysLoading) {
+      // Trigger scan if we have a URL but haven't scanned yet (pages come from same scan)
       scanApiKeys();
     }
   }
@@ -1657,6 +1670,9 @@ function renderTabFilter() {
     `;
   } else if (state.activeTab === 'keys') {
     // API Keys tab - no filter display needed
+    container.innerHTML = '';
+  } else if (state.activeTab === 'pages') {
+    // Pages tab - no filter display needed
     container.innerHTML = '';
   }
 }
@@ -1928,6 +1944,10 @@ async function scanApiKeys() {
   document.getElementById('keysLoading').classList.remove('hidden');
   document.getElementById('keysEmpty').classList.add('hidden');
   document.getElementById('keysList').innerHTML = '';
+  // Also reset pages panel
+  document.getElementById('pagesLoading').classList.remove('hidden');
+  document.getElementById('pagesEmpty').classList.add('hidden');
+  document.getElementById('pagesList').innerHTML = '';
 
   try {
     const response = await fetch('/api/scan-api-keys', {
@@ -1946,10 +1966,14 @@ async function scanApiKeys() {
     state.apiKeysLoading = false;
 
     document.getElementById('keysLoading').classList.add('hidden');
+    document.getElementById('pagesLoading').classList.add('hidden');
     renderApiKeysList();
+    renderPagesList();
+    startPageAccessStream();
     renderTabFilter();
 
     console.log(`[API Keys] Scan complete: ${data.totalMessages} console messages, ${data.detectedKeys?.length || 0} keys found`);
+    console.log(`[Pages] Found ${data.pageAccess?.length || 0} pages`);
 
     // Auto-run AI security analysis after collecting APIs
     if (state.apiKeysAnalysis && (state.apiKeysAnalysis.apiConnector2 || state.apiKeysAnalysis.apiKeys?.length > 0)) {
@@ -1962,6 +1986,10 @@ async function scanApiKeys() {
     document.getElementById('keysLoading').classList.add('hidden');
     document.getElementById('keysEmpty').innerHTML = `<p>Failed to scan for API keys: ${error.message}</p>`;
     document.getElementById('keysEmpty').classList.remove('hidden');
+    // Also handle pages panel error state
+    document.getElementById('pagesLoading').classList.add('hidden');
+    document.getElementById('pagesEmpty').innerHTML = `<p>Failed to scan pages: ${error.message}</p>`;
+    document.getElementById('pagesEmpty').classList.remove('hidden');
   }
 }
 
@@ -2091,6 +2119,224 @@ function renderApiKeysList() {
   }
 
   container.innerHTML = html;
+}
+
+// Render the pages list showing public/private access
+function renderPagesList() {
+  const container = document.getElementById('pagesList');
+  const emptyEl = document.getElementById('pagesEmpty');
+  const loadingEl = document.getElementById('pagesLoading');
+
+  loadingEl.classList.add('hidden');
+
+  // Get page names from the scan (for immediate display)
+  const pageNames = state.apiKeysAnalysis?.pageNames || [];
+  const pageAccess = state.apiKeysAnalysis?.pageAccess || [];
+  const editorAccess = state.apiKeysAnalysis?.editorAccess;
+
+  if (pageNames.length === 0 && pageAccess.length === 0) {
+    container.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+
+  // Build a map of page results for quick lookup
+  const pageResults = {};
+  pageAccess.forEach(p => { pageResults[p.page] = p; });
+
+  let html = '';
+
+  // Editor access section
+  html += `<div id="editorAccessSection"></div>`;
+  if (editorAccess) {
+    html = renderEditorSection(editorAccess);
+  }
+
+  // Progress indicator
+  const testedCount = pageAccess.length;
+  const totalCount = pageNames.length || testedCount;
+  if (pageNames.length > 0 && testedCount < totalCount) {
+    html += `
+      <div class="pages-progress">
+        <div class="progress-bar">
+          <div class="progress-fill" style="width: ${(testedCount / totalCount) * 100}%"></div>
+        </div>
+        <span class="progress-text">Testing pages: ${testedCount}/${totalCount}</span>
+      </div>
+    `;
+  }
+
+  // All pages in a single grid, showing status
+  html += `
+    <div class="pages-section">
+      <h4>Pages (${totalCount})</h4>
+      <div class="pages-grid" id="pagesGrid">
+        ${(pageNames.length > 0 ? pageNames : pageAccess.map(p => p.page)).map(pageName => {
+          const result = pageResults[pageName];
+          if (result) {
+            if (result.error) {
+              return `
+                <div class="page-card error" data-page="${pageName}">
+                  <span class="page-icon">&#9888;</span>
+                  <span class="page-name">${pageName}</span>
+                  <span class="page-error">${result.error}</span>
+                </div>
+              `;
+            } else if (result.accessible) {
+              return `
+                <div class="page-card public" data-page="${pageName}">
+                  <span class="page-icon">&#128275;</span>
+                  <span class="page-name">${pageName}</span>
+                  <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
+                </div>
+              `;
+            } else {
+              return `
+                <div class="page-card protected" data-page="${pageName}">
+                  <span class="page-icon">&#128274;</span>
+                  <span class="page-name">${pageName}</span>
+                  <span class="page-redirect">&#8594; ${result.redirectTarget || 'login'}</span>
+                </div>
+              `;
+            }
+          } else {
+            // Pending - not yet tested
+            return `
+              <div class="page-card pending" data-page="${pageName}">
+                <span class="page-icon spinner-tiny"></span>
+                <span class="page-name">${pageName}</span>
+              </div>
+            `;
+          }
+        }).join('')}
+      </div>
+    </div>
+  `;
+
+  container.innerHTML = html;
+}
+
+// Render editor section helper - only shows if editor is publicly accessible
+function renderEditorSection(editorAccess) {
+  if (!editorAccess || !editorAccess.accessible) return '';
+  return `
+    <div class="pages-section editor-section editor-exposed">
+      <h4>Editor Access</h4>
+      <div class="editor-status">
+        <span class="editor-icon">&#9888;</span>
+        <span class="editor-label">Editor is publicly accessible!</span>
+        ${editorAccess.url ? `<a href="${editorAccess.url}" target="_blank" class="editor-link">Open Editor &#8599;</a>` : ''}
+      </div>
+    </div>
+  `;
+}
+
+// Start streaming page access tests
+function startPageAccessStream() {
+  if (!state.bubbleUrl || !state.apiKeysAnalysis?.pageNames?.length) return;
+
+  console.log('[Pages] Starting page access stream...');
+
+  const eventSource = new EventSource(`/api/test-pages-stream?url=${encodeURIComponent(state.bubbleUrl)}`);
+
+  eventSource.addEventListener('start', (e) => {
+    const data = JSON.parse(e.data);
+    console.log(`[Pages] Stream started: ${data.totalPages} pages`);
+  });
+
+  eventSource.addEventListener('pageResult', (e) => {
+    const result = JSON.parse(e.data);
+    console.log(`[Pages] Result for ${result.page}: ${result.accessible ? 'public' : 'protected'}`);
+
+    // Update state
+    if (!state.apiKeysAnalysis.pageAccess) {
+      state.apiKeysAnalysis.pageAccess = [];
+    }
+    state.apiKeysAnalysis.pageAccess.push(result);
+
+    // Update the specific page card in the DOM
+    updatePageCard(result);
+
+    // Update progress
+    updatePagesProgress();
+  });
+
+  eventSource.addEventListener('editorResult', (e) => {
+    const result = JSON.parse(e.data);
+    console.log(`[Pages] Editor result: ${result.accessible ? 'accessible' : 'protected'}`);
+    state.apiKeysAnalysis.editorAccess = result;
+
+    // Update editor section
+    const editorSection = document.getElementById('editorAccessSection');
+    if (editorSection) {
+      editorSection.outerHTML = renderEditorSection(result);
+    }
+  });
+
+  eventSource.addEventListener('complete', (e) => {
+    console.log('[Pages] Stream complete');
+    eventSource.close();
+
+    // Remove progress bar
+    const progressEl = document.querySelector('.pages-progress');
+    if (progressEl) progressEl.remove();
+  });
+
+  eventSource.addEventListener('error', (e) => {
+    console.error('[Pages] Stream error');
+    eventSource.close();
+  });
+
+  eventSource.onerror = () => {
+    console.error('[Pages] EventSource error');
+    eventSource.close();
+  };
+}
+
+// Update a single page card in the DOM
+function updatePageCard(result) {
+  const card = document.querySelector(`.page-card[data-page="${result.page}"]`);
+  if (!card) return;
+
+  if (result.error) {
+    card.className = 'page-card error';
+    card.innerHTML = `
+      <span class="page-icon">&#9888;</span>
+      <span class="page-name">${result.page}</span>
+      <span class="page-error">${result.error}</span>
+    `;
+  } else if (result.accessible) {
+    card.className = 'page-card public';
+    card.innerHTML = `
+      <span class="page-icon">&#128275;</span>
+      <span class="page-name">${result.page}</span>
+      <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
+    `;
+  } else {
+    card.className = 'page-card protected';
+    card.innerHTML = `
+      <span class="page-icon">&#128274;</span>
+      <span class="page-name">${result.page}</span>
+      <span class="page-redirect">&#8594; ${result.redirectTarget || 'login'}</span>
+    `;
+  }
+}
+
+// Update progress bar
+function updatePagesProgress() {
+  const progressEl = document.querySelector('.pages-progress');
+  if (!progressEl) return;
+
+  const testedCount = state.apiKeysAnalysis?.pageAccess?.length || 0;
+  const totalCount = state.apiKeysAnalysis?.pageNames?.length || testedCount;
+
+  const fill = progressEl.querySelector('.progress-fill');
+  const text = progressEl.querySelector('.progress-text');
+
+  if (fill) fill.style.width = `${(testedCount / totalCount) * 100}%`;
+  if (text) text.textContent = `Testing pages: ${testedCount}/${totalCount}`;
 }
 
 // Analyze API exposure using AI
