@@ -1730,6 +1730,12 @@ app.post('/api/scan-api-keys', async (req, res) => {
           } catch (navError) {
             if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
               response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            } else if (navError.message.includes('detached') || navError.message.includes('Detached')) {
+              // Frame was detached, create a fresh page and retry
+              console.log(`[API Keys] Frame detached, creating fresh page`);
+              try { await page.close(); } catch (e) {}
+              page = await browser.newPage();
+              response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
             } else {
               throw navError;
             }
