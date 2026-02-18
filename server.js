@@ -1711,17 +1711,60 @@ app.post('/api/scan-api-keys', async (req, res) => {
       console.log(`[API Keys] App plan not found`);
     }
 
-    // Log pages info and extract page names (without testing access yet)
+    // Log pages info and extract page names
     let pageNames = [];
+    let pageAccessResults = [];
     if (extractedData.pages) {
+      const baseUrl = new URL(url);
       pageNames = Object.values(extractedData.pages).map(p => p['%nm']).filter(Boolean);
       console.log(`[API Keys] Pages found: ${pageNames.length}`);
+      console.log(`[API Keys] Testing ${pageNames.length} pages for redirects...`);
+
+      for (const pageName of pageNames) {
+        const pageUrl = `${baseUrl.origin}/${pageName}`;
+        console.log(`[API Keys] Testing page: ${pageName}`);
+        try {
+          let response;
+          try {
+            response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+          } catch (navError) {
+            if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
+              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            } else {
+              throw navError;
+            }
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 1500));
+
+          const finalUrl = page.url();
+          const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
+          const redirected = finalPath !== pageName;
+          const redirectTarget = redirected ? finalPath || 'index' : null;
+
+          pageAccessResults.push({
+            page: pageName,
+            requestedUrl: pageUrl,
+            finalUrl: finalUrl,
+            redirected: redirected,
+            redirectTarget: redirectTarget,
+            accessible: !redirected
+          });
+
+          console.log(`[API Keys] Page ${pageName}: ${redirected ? `redirected to ${redirectTarget}` : 'accessible'}`);
+        } catch (e) {
+          pageAccessResults.push({
+            page: pageName,
+            requestedUrl: pageUrl,
+            error: e.message,
+            accessible: false
+          });
+          console.log(`[API Keys] Page ${pageName}: error - ${e.message}`);
+        }
+      }
     } else {
       console.log(`[API Keys] Pages not found`);
     }
-
-    // Skip page access testing here - it's now done via streaming endpoint
-    const pageAccessResults = [];
 
     // Test editor URL access if available (use test version instead of live)
     let editorAccess = null;

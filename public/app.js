@@ -1969,7 +1969,6 @@ async function scanApiKeys() {
     document.getElementById('pagesLoading').classList.add('hidden');
     renderApiKeysList();
     renderPagesList();
-    startPageAccessStream();
     renderTabFilter();
 
     console.log(`[API Keys] Scan complete: ${data.totalMessages} console messages, ${data.detectedKeys?.length || 0} keys found`);
@@ -2129,12 +2128,10 @@ function renderPagesList() {
 
   loadingEl.classList.add('hidden');
 
-  // Get page names from the scan (for immediate display)
-  const pageNames = state.apiKeysAnalysis?.pageNames || [];
   const pageAccess = state.apiKeysAnalysis?.pageAccess || [];
   const editorAccess = state.apiKeysAnalysis?.editorAccess;
 
-  if (pageNames.length === 0 && pageAccess.length === 0) {
+  if (pageAccess.length === 0) {
     container.innerHTML = '';
     emptyEl.classList.remove('hidden');
     return;
@@ -2142,70 +2139,37 @@ function renderPagesList() {
 
   emptyEl.classList.add('hidden');
 
-  // Build a map of page results for quick lookup
-  const pageResults = {};
-  pageAccess.forEach(p => { pageResults[p.page] = p; });
-
   let html = '';
 
-  // Editor access section
-  html += `<div id="editorAccessSection"></div>`;
-  if (editorAccess) {
-    html = renderEditorSection(editorAccess);
-  }
+  // Editor access section (only shows if publicly accessible)
+  html += renderEditorSection(editorAccess);
 
-  // Progress indicator
-  const testedCount = pageAccess.length;
-  const totalCount = pageNames.length || testedCount;
-  if (pageNames.length > 0 && testedCount < totalCount) {
-    html += `
-      <div class="pages-progress">
-        <div class="progress-bar">
-          <div class="progress-fill" style="width: ${(testedCount / totalCount) * 100}%"></div>
-        </div>
-        <span class="progress-text">Testing pages: ${testedCount}/${totalCount}</span>
-      </div>
-    `;
-  }
-
-  // All pages in a single grid, showing status
+  // All pages in a single grid
   html += `
     <div class="pages-section">
-      <h4>Pages (${totalCount})</h4>
+      <h4>Pages (${pageAccess.length})</h4>
       <div class="pages-grid" id="pagesGrid">
-        ${(pageNames.length > 0 ? pageNames : pageAccess.map(p => p.page)).map(pageName => {
-          const result = pageResults[pageName];
-          if (result) {
-            if (result.error) {
-              return `
-                <div class="page-card error" data-page="${pageName}">
-                  <span class="page-icon">&#9888;</span>
-                  <span class="page-name">${pageName}</span>
-                  <span class="page-error">${result.error}</span>
-                </div>
-              `;
-            } else if (result.accessible) {
-              return `
-                <div class="page-card public" data-page="${pageName}">
-                  <span class="page-name">${pageName}</span>
-                  <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
-                </div>
-              `;
-            } else {
-              return `
-                <div class="page-card protected" data-page="${pageName}">
-                  <span class="page-icon">&#128274;</span>
-                  <span class="page-name">${pageName}</span>
-                  <span class="page-redirect">&#8594; ${result.redirectTarget || 'login'}</span>
-                </div>
-              `;
-            }
-          } else {
-            // Pending - not yet tested
+        ${pageAccess.map(result => {
+          if (result.error) {
             return `
-              <div class="page-card pending" data-page="${pageName}">
-                <span class="page-icon spinner-tiny"></span>
-                <span class="page-name">${pageName}</span>
+              <div class="page-card error" data-page="${result.page}">
+                <span class="page-icon">&#9888;</span>
+                <span class="page-name">${result.page}</span>
+              </div>
+            `;
+          } else if (result.accessible) {
+            return `
+              <div class="page-card public" data-page="${result.page}">
+                <span class="page-name">${result.page}</span>
+                <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
+              </div>
+            `;
+          } else {
+            return `
+              <div class="page-card protected" data-page="${result.page}">
+                <span class="page-icon">&#128274;</span>
+                <span class="page-name">${result.page}</span>
+                <span class="page-redirect">&#8594; ${result.redirectTarget || 'login'}</span>
               </div>
             `;
           }
