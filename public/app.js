@@ -193,6 +193,9 @@ async function startScan() {
 
     // Start sensitivity analysis in background (doesn't block UI)
     analyzeSensitivity();
+
+    // Run API keys/pages scan immediately (doesn't depend on tables having data)
+    scanApiKeys();
   } catch (error) {
     hideLoading();
     showError('step1Error', `Scan failed: ${error.message}`);
@@ -261,9 +264,6 @@ async function analyzeSensitivity() {
 
   // Run endpoint analysis in background (now that we have exposed data)
   analyzeEndpoints();
-
-  // Run API keys scan in background
-  scanApiKeys();
 }
 
 // Analyze a single table's sensitivity (used for parallel processing)
