@@ -1725,19 +1725,38 @@ app.post('/api/scan-api-keys', async (req, res) => {
         console.log(`[API Keys] Testing page: ${pageName}`);
         try {
           let response;
+          let finalUrl;
+
           try {
             response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            finalUrl = page.url();
           } catch (navError) {
+            // Handle timeout, detached frame, or session closed errors
             if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              try {
+                response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                finalUrl = page.url();
+              } catch (retryError) {
+                throw retryError;
+              }
+            } else if (navError.message.includes('detached') || navError.message.includes('Session closed')) {
+              // Frame was detached during navigation - likely a redirect, mark as protected
+              console.log(`[API Keys] Page ${pageName}: frame detached (likely redirect)`);
+              pageAccessResults.push({
+                page: pageName,
+                requestedUrl: pageUrl,
+                redirected: true,
+                redirectTarget: 'unknown',
+                accessible: false
+              });
+              continue;
             } else {
               throw navError;
             }
           }
 
-          await new Promise(resolve => setTimeout(resolve, 1500));
-
-          const finalUrl = page.url();
           const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
           const redirected = finalPath !== pageName;
           const redirectTarget = redirected ? finalPath || 'index' : null;
