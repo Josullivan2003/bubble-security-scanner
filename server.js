@@ -1723,32 +1723,21 @@ app.post('/api/scan-api-keys', async (req, res) => {
       for (const pageName of pageNames) {
         const pageUrl = `${baseUrl.origin}/${pageName}`;
         console.log(`[API Keys] Testing page: ${pageName}`);
-
-        // Create a fresh page for each test to avoid frame detachment issues
-        let testPage = null;
         try {
-          testPage = await browser.newPage();
           let response;
-          let finalUrl;
-
           try {
-            response = await testPage.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            finalUrl = testPage.url();
+            response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
           } catch (navError) {
             if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-              try {
-                response = await testPage.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                finalUrl = testPage.url();
-              } catch (retryError) {
-                throw retryError;
-              }
+              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
             } else {
               throw navError;
             }
           }
 
+          await new Promise(resolve => setTimeout(resolve, 1500));
+
+          const finalUrl = page.url();
           const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
           const redirected = finalPath !== pageName;
           const redirectTarget = redirected ? finalPath || 'index' : null;
@@ -1771,16 +1760,6 @@ app.post('/api/scan-api-keys', async (req, res) => {
             accessible: false
           });
           console.log(`[API Keys] Page ${pageName}: error - ${e.message}`);
-
-          // If connection closed, try to recover by checking browser state
-          if (e.message.includes('Connection closed') || e.message.includes('Session closed')) {
-            console.log(`[API Keys] Browser connection lost, stopping page tests`);
-            break;
-          }
-        } finally {
-          if (testPage) {
-            try { await testPage.close(); } catch (e) {}
-          }
         }
       }
     } else {
