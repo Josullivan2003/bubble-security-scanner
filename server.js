@@ -1723,35 +1723,27 @@ app.post('/api/scan-api-keys', async (req, res) => {
       for (const pageName of pageNames) {
         const pageUrl = `${baseUrl.origin}/${pageName}`;
         console.log(`[API Keys] Testing page: ${pageName}`);
+
+        // Create a fresh page for each test to avoid frame detachment issues
+        let testPage = null;
         try {
+          testPage = await browser.newPage();
           let response;
           let finalUrl;
 
           try {
-            response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+            response = await testPage.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
             await new Promise(resolve => setTimeout(resolve, 1000));
-            finalUrl = page.url();
+            finalUrl = testPage.url();
           } catch (navError) {
-            // Handle timeout, detached frame, or session closed errors
             if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
               try {
-                response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                response = await testPage.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                finalUrl = page.url();
+                finalUrl = testPage.url();
               } catch (retryError) {
                 throw retryError;
               }
-            } else if (navError.message.includes('detached') || navError.message.includes('Session closed')) {
-              // Frame was detached during navigation - likely a redirect, mark as protected
-              console.log(`[API Keys] Page ${pageName}: frame detached (likely redirect)`);
-              pageAccessResults.push({
-                page: pageName,
-                requestedUrl: pageUrl,
-                redirected: true,
-                redirectTarget: 'unknown',
-                accessible: false
-              });
-              continue;
             } else {
               throw navError;
             }
@@ -1779,6 +1771,10 @@ app.post('/api/scan-api-keys', async (req, res) => {
             accessible: false
           });
           console.log(`[API Keys] Page ${pageName}: error - ${e.message}`);
+        } finally {
+          if (testPage) {
+            try { await testPage.close(); } catch (e) {}
+          }
         }
       }
     } else {
