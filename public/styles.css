@@ -4004,13 +4004,14 @@ button:disabled {
 }
 
 .page-card.public {
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(0, 0, 0, 0.1);
 }
 
 .page-card.protected {
-  background: rgba(59, 130, 246, 0.1);
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgba(156, 163, 175, 0.15);
+  border: 1px solid rgba(156, 163, 175, 0.3);
+  opacity: 0.7;
 }
 
 .page-card.error {
@@ -4029,11 +4030,11 @@ button:disabled {
 }
 
 .page-card.public .page-icon {
-  color: #f59e0b;
+  color: #374151;
 }
 
 .page-card.protected .page-icon {
-  color: #3b82f6;
+  color: #9ca3af;
 }
 
 .page-card.error .page-icon {

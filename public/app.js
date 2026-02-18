@@ -2187,7 +2187,6 @@ function renderPagesList() {
             } else if (result.accessible) {
               return `
                 <div class="page-card public" data-page="${pageName}">
-                  <span class="page-icon">&#128275;</span>
                   <span class="page-name">${pageName}</span>
                   <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
                 </div>
@@ -2310,7 +2309,6 @@ function updatePageCard(result) {
   } else if (result.accessible) {
     card.className = 'page-card public';
     card.innerHTML = `
-      <span class="page-icon">&#128275;</span>
       <span class="page-name">${result.page}</span>
       <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
     `;
