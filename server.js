@@ -1771,6 +1771,12 @@ app.post('/api/scan-api-keys', async (req, res) => {
             accessible: false
           });
           console.log(`[API Keys] Page ${pageName}: error - ${e.message}`);
+
+          // If connection closed, try to recover by checking browser state
+          if (e.message.includes('Connection closed') || e.message.includes('Session closed')) {
+            console.log(`[API Keys] Browser connection lost, stopping page tests`);
+            break;
+          }
         } finally {
           if (testPage) {
             try { await testPage.close(); } catch (e) {}
