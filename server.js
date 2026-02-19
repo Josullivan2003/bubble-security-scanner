@@ -1442,13 +1442,13 @@ app.post('/api/scan-api-keys', async (req, res) => {
     // Navigate to the page
     console.log(`[API Keys] Navigating to ${url}`);
     await page.goto(url, {
-      waitUntil: 'networkidle0',
-      timeout: 45000
+      waitUntil: 'networkidle2',
+      timeout: 20000
     });
 
     // Wait for Bubble app to fully initialize (they load JS dynamically)
     console.log(`[API Keys] Waiting for Bubble app to initialize...`);
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Try to wait for Bubble's app object to be available
     try {
@@ -1726,22 +1726,23 @@ app.post('/api/scan-api-keys', async (req, res) => {
         try {
           let response;
           try {
-            response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+            response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
           } catch (navError) {
             if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              // Page took too long, just check current URL
+              console.log(`[API Keys] Page ${pageName}: timeout, checking URL anyway`);
             } else if (navError.message.includes('detached') || navError.message.includes('Detached')) {
               // Frame was detached, create a fresh page and retry
               console.log(`[API Keys] Frame detached, creating fresh page`);
               try { await page.close(); } catch (e) {}
               page = await browser.newPage();
-              response = await page.goto(pageUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
             } else {
               throw navError;
             }
           }
 
-          await new Promise(resolve => setTimeout(resolve, 1500));
+          await new Promise(resolve => setTimeout(resolve, 500));
 
           const finalUrl = page.url();
           const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
@@ -1781,16 +1782,16 @@ app.post('/api/scan-api-keys', async (req, res) => {
       try {
         let response;
         try {
-          response = await page.goto(testEditorUrl, { waitUntil: 'networkidle2', timeout: 10000 });
+          response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
         } catch (navError) {
           if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-            response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            console.log(`[API Keys] Editor test timeout`);
           } else {
             throw navError;
           }
         }
 
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         // Check for permission denied alert on the page
         const permissionDenied = await page.evaluate(() => {
