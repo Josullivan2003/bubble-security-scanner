@@ -1630,13 +1630,17 @@ function switchTab(tabName) {
 
   // If switching to pages, show current state or trigger scan
   if (tabName === 'pages') {
-    if (state.apiKeysAnalysis && state.apiKeysAnalysis.pageAccess) {
-      renderPagesList();
-    } else if (state.apiKeysLoading) {
+    if (state.apiKeysLoading) {
       document.getElementById('pagesLoading').classList.remove('hidden');
-    } else if (state.bubbleUrl && !state.apiKeysLoading) {
+      document.getElementById('pagesEmpty').classList.add('hidden');
+    } else if (state.apiKeysAnalysis && state.apiKeysAnalysis.pageAccess && state.apiKeysAnalysis.pageAccess.length > 0) {
+      renderPagesList();
+    } else if (state.bubbleUrl && !state.apiKeysLoading && !state.apiKeysAnalysis) {
       // Trigger scan if we have a URL but haven't scanned yet (pages come from same scan)
       scanApiKeys();
+    } else {
+      // No pages found after scan completed
+      document.getElementById('pagesEmpty').classList.remove('hidden');
     }
   }
 }
