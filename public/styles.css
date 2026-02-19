@@ -4006,6 +4006,10 @@ button:disabled {
   background: #1f2937;
 }
 
+.pages-header .export-btn.hidden {
+  display: none;
+}
+
 .pages-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
