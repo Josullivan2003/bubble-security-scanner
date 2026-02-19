@@ -1977,6 +1977,7 @@ async function scanApiKeys() {
 
     console.log(`[API Keys] Scan complete: ${data.totalMessages} console messages, ${data.detectedKeys?.length || 0} keys found`);
     console.log(`[Pages] Found ${data.pageAccess?.length || 0} pages`);
+    console.log('[Pages] pageAccess data:', JSON.stringify(data.pageAccess?.slice(0, 2)));
 
     // Auto-run AI security analysis after collecting APIs
     if (state.apiKeysAnalysis && (state.apiKeysAnalysis.apiConnector2 || state.apiKeysAnalysis.apiKeys?.length > 0)) {
@@ -2135,7 +2136,11 @@ function renderPagesList() {
   const pageAccess = state.apiKeysAnalysis?.pageAccess || [];
   const editorAccess = state.apiKeysAnalysis?.editorAccess;
 
+  console.log('[renderPagesList] pageAccess length:', pageAccess.length);
+  console.log('[renderPagesList] state.apiKeysAnalysis:', state.apiKeysAnalysis ? 'exists' : 'null');
+
   if (pageAccess.length === 0) {
+    console.log('[renderPagesList] No pages, showing empty');
     container.innerHTML = '';
     emptyEl.classList.remove('hidden');
     return;
