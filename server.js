@@ -538,14 +538,15 @@ async function getAppPlan(url) {
     }
 
     const page = await browser.newPage();
-    await page.goto(url, { waitUntil: 'networkidle0', timeout: 45000 });
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    // Don't wait for full network idle - just DOM content, then wait for appquery
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-    // Try to wait for Bubble's app object
+    // Wait for Bubble's appquery object (it loads early)
     try {
-      await page.waitForFunction(() => window.appquery, { timeout: 10000 });
+      await page.waitForFunction(() => window.appquery && window.appquery.app_plan, { timeout: 15000 });
     } catch (e) {
-      // Continue anyway
+      // Give it a bit more time then continue
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     // Extract just the app plan
@@ -1711,134 +1712,28 @@ app.post('/api/scan-api-keys', async (req, res) => {
       console.log(`[API Keys] App plan not found`);
     }
 
-    // Log pages info and extract page names
+    // Extract page names (no testing - that's done by /api/test-pages)
     let pageNames = [];
-    let pageAccessResults = [];
     if (extractedData.pages) {
-      const baseUrl = new URL(url);
       pageNames = Object.values(extractedData.pages).map(p => p['%nm']).filter(Boolean);
       console.log(`[API Keys] Pages found: ${pageNames.length}`);
-      console.log(`[API Keys] Testing ${pageNames.length} pages for redirects...`);
-
-      for (const pageName of pageNames) {
-        const pageUrl = `${baseUrl.origin}/${pageName}`;
-        console.log(`[API Keys] Testing page: ${pageName}`);
-        try {
-          let response;
-          try {
-            response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
-          } catch (navError) {
-            if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-              // Page took too long, just check current URL
-              console.log(`[API Keys] Page ${pageName}: timeout, checking URL anyway`);
-            } else if (navError.message.includes('detached') || navError.message.includes('Detached')) {
-              // Frame was detached, create a fresh page and retry
-              console.log(`[API Keys] Frame detached, creating fresh page`);
-              try { await page.close(); } catch (e) {}
-              page = await browser.newPage();
-              response = await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
-            } else {
-              throw navError;
-            }
-          }
-
-          await new Promise(resolve => setTimeout(resolve, 500));
-
-          const finalUrl = page.url();
-          const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
-          const redirected = finalPath !== pageName;
-          const redirectTarget = redirected ? finalPath || 'index' : null;
-
-          pageAccessResults.push({
-            page: pageName,
-            requestedUrl: pageUrl,
-            finalUrl: finalUrl,
-            redirected: redirected,
-            redirectTarget: redirectTarget,
-            accessible: !redirected
-          });
-
-          console.log(`[API Keys] Page ${pageName}: ${redirected ? `redirected to ${redirectTarget}` : 'accessible'}`);
-        } catch (e) {
-          pageAccessResults.push({
-            page: pageName,
-            requestedUrl: pageUrl,
-            error: e.message,
-            accessible: false
-          });
-          console.log(`[API Keys] Page ${pageName}: error - ${e.message}`);
-        }
-      }
     } else {
       console.log(`[API Keys] Pages not found`);
-    }
-
-    // Test editor URL access if available (use test version instead of live)
-    let editorAccess = null;
-    if (extractedData.editorUrl) {
-      // Change version=live to version=test for testing
-      const testEditorUrl = extractedData.editorUrl.replace('version=live', 'version=test');
-      console.log(`[API Keys] Testing editor URL: ${testEditorUrl}`);
-      try {
-        let response;
-        try {
-          response = await page.goto(testEditorUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
-        } catch (navError) {
-          if (navError.message.includes('timeout') || navError.message.includes('Timeout')) {
-            console.log(`[API Keys] Editor test timeout`);
-          } else {
-            throw navError;
-          }
-        }
-
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Check for permission denied alert on the page
-        const permissionDenied = await page.evaluate(() => {
-          const bodyText = document.body ? document.body.innerText.toLowerCase() : '';
-          return bodyText.includes('do not have permission') ||
-                 bodyText.includes('don\'t have permission') ||
-                 bodyText.includes('permission to view') ||
-                 bodyText.includes('access denied') ||
-                 bodyText.includes('not authorized');
-        });
-
-        const finalUrl = page.url();
-        const redirectedToLogin = finalUrl.includes('login') || finalUrl.includes('signin') || finalUrl.includes('auth');
-
-        editorAccess = {
-          url: testEditorUrl,
-          finalUrl: finalUrl,
-          accessible: !permissionDenied && !redirectedToLogin,
-          permissionDenied: permissionDenied,
-          redirectedToLogin: redirectedToLogin,
-          status: response ? response.status() : null
-        };
-
-        console.log(`[API Keys] Editor: ${editorAccess.accessible ? 'ACCESSIBLE (security risk!)' : 'protected'} (permissionDenied: ${permissionDenied})`);
-      } catch (e) {
-        console.log(`[API Keys] Editor test error: ${e.message}`);
-        editorAccess = {
-          url: testEditorUrl,
-          error: e.message,
-          accessible: false
-        };
-      }
     }
 
     // Close browser before sending response
     await browser.close();
     browser = null;
 
+    // Return data without page access testing (use /api/test-pages for that)
     res.json({
       apiKeys: apiKeys,
       apiConnector2: extractedData.apiConnector2,
       clientSafe: extractedData.clientSafe,
       appPlan: extractedData.appPlan,
       pages: extractedData.pages,
-      pageNames: pageNames,  // List of page names for immediate display
-      pageAccess: pageAccessResults,
-      editorAccess: editorAccess,
+      pageNames: pageNames,
+      editorUrl: extractedData.editorUrl,  // Pass to frontend for /api/test-pages
       scannedUrl: url
     });
 
@@ -1853,6 +1748,122 @@ app.post('/api/scan-api-keys', async (req, res) => {
       error: 'Failed to scan for API keys',
       details: error.message
     });
+  }
+});
+
+// Separate endpoint for testing page access (supports pagination via offset)
+app.post('/api/test-pages', async (req, res) => {
+  const { url, pageNames, editorUrl, offset = 0 } = req.body;
+
+  if (!url || !pageNames) {
+    return res.status(400).json({ error: 'URL and pageNames are required' });
+  }
+
+  // Batch size for Vercel's 60-second timeout (~2s per page = 20 pages per batch)
+  const BATCH_SIZE = 20;
+  const startIndex = offset;
+  const endIndex = Math.min(startIndex + BATCH_SIZE, pageNames.length);
+  const pagesToTest = pageNames.slice(startIndex, endIndex);
+  const hasMore = endIndex < pageNames.length;
+
+  console.log(`[Test Pages] Testing pages ${startIndex + 1}-${endIndex} of ${pageNames.length} on ${url}`);
+
+  let browser = null;
+  let page = null;
+  try {
+    const baseUrl = new URL(url);
+
+    // Launch browser
+    const isProduction = process.env.NODE_ENV === 'production' || process.env.VERCEL;
+    if (isProduction) {
+      console.log('[Test Pages] Using Browserless.io');
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://production-sfo.browserless.io?token=${process.env.BROWSERLESS_API_KEY}`
+      });
+    } else {
+      console.log('[Test Pages] Using local Chrome');
+      browser = await puppeteer.launch({
+        headless: 'new',
+        executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+    }
+
+    page = await browser.newPage();
+
+    // Test pages sequentially with a single page (much faster than creating new pages)
+    let pageAccessResults = [];
+    for (const pageName of pagesToTest) {
+      const pageUrl = `${baseUrl.origin}/${pageName}`;
+      try {
+        try {
+          // Fast navigation - short timeout, Bubble redirects happen quickly
+          await page.goto(pageUrl, { waitUntil: 'load', timeout: 1500 });
+        } catch (navError) {
+          if (navError.message.includes('detached') || navError.message.includes('Detached')) {
+            // Recreate page if frame detached
+            try { await page.close(); } catch (e) {}
+            page = await browser.newPage();
+            await page.goto(pageUrl, { waitUntil: 'load', timeout: 1500 });
+          } else if (!navError.message.includes('timeout') && !navError.message.includes('Timeout')) {
+            throw navError;
+          }
+        }
+
+        // Brief wait for any JS redirect (Bubble redirects happen quickly)
+        await new Promise(resolve => setTimeout(resolve, 400));
+
+        const finalUrl = page.url();
+        const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
+        const redirected = finalPath !== pageName;
+        const redirectTarget = redirected ? finalPath || 'index' : null;
+
+        pageAccessResults.push({
+          page: pageName,
+          requestedUrl: pageUrl,
+          finalUrl: finalUrl,
+          redirected: redirected,
+          redirectTarget: redirectTarget,
+          accessible: !redirected
+        });
+      } catch (e) {
+        pageAccessResults.push({
+          page: pageName,
+          requestedUrl: pageUrl,
+          error: e.message,
+          accessible: false
+        });
+        // Recreate page on error
+        try { await page.close(); } catch (err) {}
+        page = await browser.newPage();
+      }
+    }
+
+    const accessible = pageAccessResults.filter(p => p.accessible).length;
+    const protected_ = pageAccessResults.filter(p => !p.accessible && !p.error).length;
+    console.log(`[Test Pages] Complete: ${accessible} accessible, ${protected_} protected`);
+
+    if (page) {
+      try { await page.close(); } catch (e) {}
+    }
+    await browser.close();
+    browser = null;
+
+    res.json({
+      pageAccess: pageAccessResults,
+      totalPages: pageNames.length,
+      testedCount: pagesToTest.length,
+      offset: startIndex,
+      nextOffset: hasMore ? endIndex : null,
+      hasMore: hasMore
+    });
+
+  } catch (error) {
+    console.error('[Test Pages] Error:', error);
+    if (browser) {
+      try { await browser.close(); } catch (e) {}
+    }
+    res.status(500).json({ error: 'Failed to test pages', details: error.message });
   }
 });
 

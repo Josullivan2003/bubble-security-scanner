@@ -4010,10 +4010,63 @@ button:disabled {
   display: none;
 }
 
+.pages-header-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.pages-header-buttons a.export-btn {
+  text-decoration: none;
+}
+
+.pages-header .truncated-note {
+  font-size: 0.75rem;
+  color: #9ca3af;
+  font-style: italic;
+  margin-left: 0.5rem;
+}
+
 .pages-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
   gap: 0.75rem;
+}
+
+.scan-more-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: rgba(59, 130, 246, 0.05);
+  border-radius: 8px;
+  border: 1px dashed rgba(59, 130, 246, 0.3);
+}
+
+.scan-more-btn {
+  padding: 0.6rem 1.2rem;
+  font-size: 0.9rem;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.scan-more-btn:hover {
+  background: #2563eb;
+}
+
+.scan-more-btn:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+}
+
+.scan-more-info {
+  font-size: 0.85rem;
+  color: #6b7280;
 }
 
 .page-card {

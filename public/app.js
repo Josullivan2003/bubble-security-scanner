@@ -32,6 +32,7 @@ let state = {
   apiKeysLoading: false,          // Loading state for API keys scan
   apiExposureAnalysis: null,      // AI analysis of API exposure risk
   apiExposureLoading: false,      // Loading state for exposure analysis
+  pagesLoading: false,            // Loading state for page access testing
   riskFilters: {                  // Multi-select risk level filters
     critical: false,
     high: false,
@@ -1630,7 +1631,7 @@ function switchTab(tabName) {
 
   // If switching to pages, show current state or trigger scan
   if (tabName === 'pages') {
-    if (state.apiKeysLoading) {
+    if (state.apiKeysLoading || state.pagesLoading) {
       document.getElementById('pagesLoading').classList.remove('hidden');
       document.getElementById('pagesEmpty').classList.add('hidden');
     } else if (state.apiKeysAnalysis && state.apiKeysAnalysis.pageAccess && state.apiKeysAnalysis.pageAccess.length > 0) {
@@ -1945,6 +1946,7 @@ async function scanApiKeys() {
   state.apiKeysAnalysis = null;
   state.apiExposureAnalysis = null;
   state.apiKeysLoading = true;
+  state.pagesLoading = true;
   document.getElementById('keysLoading').classList.remove('hidden');
   document.getElementById('keysEmpty').classList.add('hidden');
   document.getElementById('keysList').innerHTML = '';
@@ -1954,6 +1956,7 @@ async function scanApiKeys() {
   document.getElementById('pagesList').innerHTML = '';
 
   try {
+    // Step 1: Scan for API keys (fast - no page testing)
     const response = await fetch('/api/scan-api-keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1966,27 +1969,37 @@ async function scanApiKeys() {
       throw new Error(data.details || data.error);
     }
 
+    // Store initial data (without page access results yet)
     state.apiKeysAnalysis = data;
     state.apiKeysLoading = false;
 
     document.getElementById('keysLoading').classList.add('hidden');
-    document.getElementById('pagesLoading').classList.add('hidden');
     renderApiKeysList();
-    renderPagesList();
     renderTabFilter();
 
-    console.log(`[API Keys] Scan complete: ${data.totalMessages} console messages, ${data.detectedKeys?.length || 0} keys found`);
-    console.log(`[Pages] Found ${data.pageAccess?.length || 0} pages`);
-    console.log('[Pages] pageAccess data:', JSON.stringify(data.pageAccess?.slice(0, 2)));
+    console.log(`[API Keys] Scan complete: ${data.apiKeys?.length || 0} keys found`);
+    console.log(`[Pages] Found ${data.pageNames?.length || 0} page names`);
 
     // Auto-run AI security analysis after collecting APIs
     if (state.apiKeysAnalysis && (state.apiKeysAnalysis.apiConnector2 || state.apiKeysAnalysis.apiKeys?.length > 0)) {
       analyzeApiExposure();
     }
 
+    // Step 2: Test pages separately (parallel batching for speed)
+    if (data.pageNames && data.pageNames.length > 0) {
+      console.log(`[Pages] Starting page access test for ${data.pageNames.length} pages...`);
+      testPageAccess(data.scannedUrl, data.pageNames, data.editorUrl);
+    } else {
+      state.pagesLoading = false;
+      document.getElementById('pagesLoading').classList.add('hidden');
+      document.getElementById('pagesEmpty').innerHTML = `<p>No pages found for this application.</p>`;
+      document.getElementById('pagesEmpty').classList.remove('hidden');
+    }
+
   } catch (error) {
     console.error('API Keys scan failed:', error);
     state.apiKeysLoading = false;
+    state.pagesLoading = false;
     document.getElementById('keysLoading').classList.add('hidden');
     document.getElementById('keysEmpty').innerHTML = `<p>Failed to scan for API keys: ${error.message}</p>`;
     document.getElementById('keysEmpty').classList.remove('hidden');
@@ -1995,6 +2008,79 @@ async function scanApiKeys() {
     document.getElementById('pagesEmpty').innerHTML = `<p>Failed to scan pages: ${error.message}</p>`;
     document.getElementById('pagesEmpty').classList.remove('hidden');
   }
+}
+
+// Separate function to test page access (called after API keys scan)
+async function testPageAccess(url, pageNames, editorUrl, offset = 0) {
+  try {
+    const response = await fetch('/api/test-pages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, pageNames, editorUrl, offset })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      throw new Error(data.details || data.error);
+    }
+
+    // Merge page access results into apiKeysAnalysis
+    if (state.apiKeysAnalysis) {
+      if (offset === 0) {
+        // First batch - replace
+        state.apiKeysAnalysis.pageAccess = data.pageAccess;
+      } else {
+        // Subsequent batches - append
+        state.apiKeysAnalysis.pageAccess = [
+          ...(state.apiKeysAnalysis.pageAccess || []),
+          ...data.pageAccess
+        ];
+      }
+      // Store pagination info
+      state.apiKeysAnalysis.totalPages = data.totalPages;
+      state.apiKeysAnalysis.nextOffset = data.nextOffset;
+      state.apiKeysAnalysis.hasMorePages = data.hasMore;
+    }
+
+    state.pagesLoading = false;
+    document.getElementById('pagesLoading').classList.add('hidden');
+    renderPagesList();
+
+    const accessible = data.pageAccess?.filter(p => p.accessible).length || 0;
+    const tested = state.apiKeysAnalysis?.pageAccess?.length || 0;
+    const total = data.totalPages || tested;
+    console.log(`[Pages] Test complete: ${tested}/${total} pages tested, ${accessible} accessible in this batch`);
+
+  } catch (error) {
+    console.error('Page access test failed:', error);
+    state.pagesLoading = false;
+    document.getElementById('pagesLoading').classList.add('hidden');
+    document.getElementById('pagesEmpty').innerHTML = `<p>Failed to test page access: ${error.message}</p>`;
+    document.getElementById('pagesEmpty').classList.remove('hidden');
+  }
+}
+
+// Scan more pages (called when user clicks "Scan more" button)
+async function scanMorePages() {
+  if (!state.apiKeysAnalysis || !state.apiKeysAnalysis.hasMorePages) return;
+
+  const url = state.apiKeysAnalysis.scannedUrl;
+  const pageNames = state.apiKeysAnalysis.pageNames;
+  const editorUrl = state.apiKeysAnalysis.editorUrl;
+  const offset = state.apiKeysAnalysis.nextOffset;
+
+  // Show loading state on button
+  const btn = document.getElementById('scanMoreBtn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Scanning...';
+  }
+
+  state.pagesLoading = true;
+  await testPageAccess(url, pageNames, editorUrl, offset);
+
+  // Button state is updated by renderPagesList
 }
 
 // Render the API keys list from extracted page data
@@ -2135,9 +2221,10 @@ function renderPagesList() {
 
   const pageAccess = state.apiKeysAnalysis?.pageAccess || [];
   const editorAccess = state.apiKeysAnalysis?.editorAccess;
+  const totalPages = state.apiKeysAnalysis?.totalPages || pageAccess.length;
+  const truncated = state.apiKeysAnalysis?.truncated || false;
 
-  console.log('[renderPagesList] pageAccess length:', pageAccess.length);
-  console.log('[renderPagesList] state.apiKeysAnalysis:', state.apiKeysAnalysis ? 'exists' : 'null');
+  console.log('[renderPagesList] pageAccess length:', pageAccess.length, 'total:', totalPages, 'truncated:', truncated);
 
   if (pageAccess.length === 0) {
     console.log('[renderPagesList] No pages, showing empty');
@@ -2150,15 +2237,17 @@ function renderPagesList() {
 
   let html = '';
 
-  // Editor access section (only shows if publicly accessible)
-  html += renderEditorSection(editorAccess);
-
   // All pages in a single grid
+  const hasMore = state.apiKeysAnalysis?.hasMorePages || false;
+  const editorUrl = state.apiKeysAnalysis?.editorUrl;
   html += `
     <div class="pages-section">
-      <div class="pages-header" ondblclick="toggleExportButton()">
-        <h4>Pages (${pageAccess.length})</h4>
-        <button id="exportPagesBtn" class="export-btn hidden" onclick="exportExposedPagesCSV()">Export URLs</button>
+      <div class="pages-header" ondblclick="toggleHiddenButtons()">
+        <h4>Pages (${pageAccess.length}${hasMore ? ` of ${totalPages}` : ''})</h4>
+        <div class="pages-header-buttons">
+          ${editorUrl ? `<a id="editorLinkBtn" class="export-btn hidden" href="${editorUrl.replace('version=live', 'version=test')}" target="_blank">Open Editor</a>` : ''}
+          <button id="exportPagesBtn" class="export-btn hidden" onclick="exportExposedPagesCSV()">Export URLs</button>
+        </div>
       </div>
       <div class="pages-grid" id="pagesGrid">
         ${pageAccess.map(result => {
@@ -2187,6 +2276,14 @@ function renderPagesList() {
           }
         }).join('')}
       </div>
+      ${state.apiKeysAnalysis?.hasMorePages ? `
+        <div class="scan-more-container">
+          <button id="scanMoreBtn" class="scan-more-btn" onclick="scanMorePages()">
+            Scan ${Math.min(20, (state.apiKeysAnalysis?.totalPages || 0) - (state.apiKeysAnalysis?.pageAccess?.length || 0))} more pages
+          </button>
+          <span class="scan-more-info">${state.apiKeysAnalysis?.pageAccess?.length || 0} of ${state.apiKeysAnalysis?.totalPages || 0} tested</span>
+        </div>
+      ` : ''}
     </div>
   `;
 
@@ -3334,11 +3431,11 @@ async function copyTextSummary() {
 }
 
 // Toggle export button visibility (activated by double-click on pages header)
-function toggleExportButton() {
-  const btn = document.getElementById('exportPagesBtn');
-  if (btn) {
-    btn.classList.toggle('hidden');
-  }
+function toggleHiddenButtons() {
+  const exportBtn = document.getElementById('exportPagesBtn');
+  const editorBtn = document.getElementById('editorLinkBtn');
+  if (exportBtn) exportBtn.classList.toggle('hidden');
+  if (editorBtn) editorBtn.classList.toggle('hidden');
 }
 
 // Export exposed/public page URLs to CSV
