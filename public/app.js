@@ -2156,7 +2156,10 @@ function renderPagesList() {
   // All pages in a single grid
   html += `
     <div class="pages-section">
-      <h4>Pages (${pageAccess.length})</h4>
+      <div class="pages-header" ondblclick="toggleExportButton()">
+        <h4>Pages (${pageAccess.length})</h4>
+        <button id="exportPagesBtn" class="export-btn hidden" onclick="exportExposedPagesCSV()">Export URLs</button>
+      </div>
       <div class="pages-grid" id="pagesGrid">
         ${pageAccess.map(result => {
           if (result.error) {
@@ -3328,4 +3331,43 @@ async function copyTextSummary() {
   } catch (err) {
     console.error('Failed to copy:', err);
   }
+}
+
+// Toggle export button visibility (activated by double-click on pages header)
+function toggleExportButton() {
+  const btn = document.getElementById('exportPagesBtn');
+  if (btn) {
+    btn.classList.toggle('hidden');
+  }
+}
+
+// Export exposed/public page URLs to CSV
+function exportExposedPagesCSV() {
+  const pageAccess = state.apiKeysAnalysis?.pageAccess || [];
+  const exposedPages = pageAccess.filter(p => p.accessible && !p.error);
+
+  if (exposedPages.length === 0) {
+    alert('No exposed pages to export');
+    return;
+  }
+
+  // Build CSV content
+  const headers = ['Page Name', 'URL'];
+  const rows = exposedPages.map(p => [p.page, p.requestedUrl]);
+
+  const csvContent = [
+    headers.join(','),
+    ...rows.map(row => row.map(cell => `"${cell}"`).join(','))
+  ].join('\n');
+
+  // Create download
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.setAttribute('href', url);
+  link.setAttribute('download', `exposed-pages-${new URL(state.bubbleUrl).hostname}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
