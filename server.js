@@ -1797,21 +1797,21 @@ app.post('/api/test-pages', async (req, res) => {
       const pageUrl = `${baseUrl.origin}/${pageName}`;
       try {
         try {
-          // Fast navigation - short timeout, Bubble redirects happen quickly
-          await page.goto(pageUrl, { waitUntil: 'load', timeout: 1500 });
+          // Navigate and wait for load
+          await page.goto(pageUrl, { waitUntil: 'load', timeout: 3000 });
         } catch (navError) {
           if (navError.message.includes('detached') || navError.message.includes('Detached')) {
             // Recreate page if frame detached
             try { await page.close(); } catch (e) {}
             page = await browser.newPage();
-            await page.goto(pageUrl, { waitUntil: 'load', timeout: 1500 });
+            await page.goto(pageUrl, { waitUntil: 'load', timeout: 3000 });
           } else if (!navError.message.includes('timeout') && !navError.message.includes('Timeout')) {
             throw navError;
           }
         }
 
-        // Brief wait for any JS redirect (Bubble redirects happen quickly)
-        await new Promise(resolve => setTimeout(resolve, 400));
+        // Wait for JS redirect - Bubble apps may take a moment
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
         const finalUrl = page.url();
         const finalPath = new URL(finalUrl).pathname.replace(/^\//, '').replace(/\/$/, '');
