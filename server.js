@@ -624,31 +624,18 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
     // Step 1: Call aggregate API to get z (using user's x, y, appname)
     const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
 
-    const aggregateRequestBody = {
-      x,
-      y,
-      appname: appName,
-      type: tableType,
-    };
-
-    // Debug logging for specific tables
-    const isDebugTable = tableType.includes('expense');
-    if (isDebugTable) {
-      console.log(`\n[Aggregate-Auth DEBUG] ${tableType}:`);
-      console.log('  Step 1 request:', JSON.stringify(aggregateRequestBody, null, 2));
-    }
-
     const aggregateResponse = await fetch(aggregateUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(aggregateRequestBody),
+      body: JSON.stringify({
+        x,
+        y,
+        appname: appName,
+        type: tableType,
+      }),
     });
 
     const aggregateData = await aggregateResponse.json();
-
-    if (isDebugTable) {
-      console.log('  Step 1 response:', JSON.stringify(aggregateData, null, 2).substring(0, 500));
-    }
 
     if (!aggregateData.z) {
       console.log(`[Aggregate-Auth] ${tableType}: No z returned from Step 1`);
@@ -659,40 +646,25 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
     const appUrlObj = new URL(appUrl);
     const maggregateUrl = `${appUrlObj.origin}/elasticsearch/maggregate`;
 
-    const workerRequestBody = {
-      x,
-      y,
-      z: aggregateData.z,
-      url: maggregateUrl,
-      ...(cookies && { cookies }),
-    };
-
-    if (isDebugTable) {
-      console.log('  Step 2 URL:', maggregateUrl);
-      console.log('  Step 2 request (truncated z):', { ...workerRequestBody, z: workerRequestBody.z.substring(0, 50) + '...' });
-    }
-
     const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(workerRequestBody),
+      body: JSON.stringify({
+        x,
+        y,
+        z: aggregateData.z,
+        url: maggregateUrl,
+        ...(cookies && { cookies }),
+      }),
     });
 
     const workerData = await workerResponse.json();
-
-    if (isDebugTable) {
-      console.log('  Step 2 response:', JSON.stringify(workerData, null, 2).substring(0, 1000));
-    }
 
     // Extract count from response
     const count = workerData.count ||
                   workerData.body?.responses?.[0]?.count ||
                   workerData.body?.aggregations?.agg?.value ||
                   0;
-
-    if (isDebugTable) {
-      console.log('  Extracted count:', count);
-    }
 
     if (count === 0 && workerData.status !== 200) {
       console.log(`[Aggregate-Auth] ${tableType}: Worker returned status ${workerData.status}`);

@@ -18,6 +18,7 @@ let state = {
   cookies: '',                        // Session cookies (for logged-out scan)
   useCookies: false,                  // Don't send cookies for logged-out scan
   userMode: false,                    // If true, show auth scan section (from URL param user=yes)
+  enterpriseMode: false,              // If true, require credentials before scanning (from URL param enterprise=yes)
   // Authenticated scan state
   authXValue: '',                     // X value for authenticated scan
   authYValue: '',                     // Y value for authenticated scan
@@ -101,6 +102,10 @@ function parseUrlParams() {
   if (params.user === 'yes') {
     state.userMode = true;
     console.log('User mode enabled - auth scan section will be shown');
+  }
+  if (params.enterprise === 'yes') {
+    state.enterpriseMode = true;
+    console.log('Enterprise mode enabled - credentials required before scanning');
   }
 
   // Auto-populate and trigger scan if app URL provided
@@ -211,17 +216,25 @@ async function startScan() {
     renderTabFilter();
     document.getElementById('step2').classList.remove('hidden');
 
-    // Fetch record counts for each table in parallel
-    updateLoadingText('Counting records...');
-    await fetchAllTableCounts();
+    if (state.enterpriseMode) {
+      // Enterprise mode: Show credential form and wait for user input
+      hideLoading();
+      openAuthModal();
+      console.log('Enterprise mode: Waiting for credentials before scanning');
+    } else {
+      // Normal mode: Run automatic logged-out scan
+      // Fetch record counts for each table in parallel
+      updateLoadingText('Counting records...');
+      await fetchAllTableCounts();
 
-    hideLoading();
+      hideLoading();
 
-    // Start sensitivity analysis in background (doesn't block UI)
-    analyzeSensitivity();
+      // Start sensitivity analysis in background (doesn't block UI)
+      analyzeSensitivity();
 
-    // Run API keys/pages scan immediately (doesn't depend on tables having data)
-    scanApiKeys();
+      // Run API keys/pages scan immediately (doesn't depend on tables having data)
+      scanApiKeys();
+    }
   } catch (error) {
     hideLoading();
     showError('step1Error', `Scan failed: ${error.message}`);
@@ -703,7 +716,6 @@ async function selectTable(tableId, displayName) {
     });
 
     const data = await response.json();
-    console.log('selectTable API response for', tableId, ':', JSON.stringify(data).substring(0, 500));
 
     if (data.error) {
       throw new Error(data.error);
@@ -716,7 +728,6 @@ async function selectTable(tableId, displayName) {
 
     // Parse results
     state.results = parseResults(data);
-    console.log('selectTable parsed results count:', state.results.length);
 
     // Check if there are more records than returned (400+ case)
     const hasMore = data.body && data.body.at_end === false && state.results.length >= 400;
@@ -1543,6 +1554,12 @@ async function runAuthenticatedScan() {
   state.authYValue = yValue;
   state.authCookies = cookies;
 
+  // In enterprise mode, also use these as the main x/y values for logged-out scan
+  if (state.enterpriseMode) {
+    state.xValue = xValue;
+    state.yValue = yValue;
+  }
+
   console.log('Running authenticated scan with:', { x: xValue, y: yValue, cookies: cookies.substring(0, 50) + '...' });
 
   // Disable button during scan
@@ -1551,25 +1568,53 @@ async function runAuthenticatedScan() {
   btn.textContent = 'Scanning...';
 
   try {
-    // Run authenticated sensitivity analysis
-    await runAuthenticatedAnalysis();
+    if (state.enterpriseMode) {
+      // Enterprise mode: Run both logged-out and logged-in scans
+      console.log('Enterprise mode: Running both logged-out and logged-in scans');
 
-    // Mark that we have auth data
-    state.hasAuthData = true;
+      // First, run logged-out scan (no cookies, using user's x, y)
+      btn.textContent = 'Scanning logged-out...';
+      await fetchAllTableCounts(); // Uses state.xValue, state.yValue (now set to user's values)
+      await analyzeSensitivity();
 
-    // Close the modal
-    closeAuthModal();
+      // Then run logged-in scan (with cookies)
+      btn.textContent = 'Scanning logged-in...';
+      await runAuthenticatedAnalysis();
 
-    // Switch to logged-in view (will now show data since hasAuthData is true)
-    switchView('logged-in');
+      // Run API keys/pages scan
+      scanApiKeys();
 
-    // Update the toggle to show logged-in state
-    const toggle = document.getElementById('viewToggle');
-    if (toggle) {
-      toggle.checked = true;
+      // Mark that we have auth data
+      state.hasAuthData = true;
+
+      // Close the modal
+      closeAuthModal();
+
+      // Start with logged-out view in enterprise mode
+      switchView('logged-out');
+
+      console.log('Enterprise scan complete (both views ready)');
+    } else {
+      // Normal mode: Just run authenticated scan
+      await runAuthenticatedAnalysis();
+
+      // Mark that we have auth data
+      state.hasAuthData = true;
+
+      // Close the modal
+      closeAuthModal();
+
+      // Switch to logged-in view (will now show data since hasAuthData is true)
+      switchView('logged-in');
+
+      // Update the toggle to show logged-in state
+      const toggle = document.getElementById('viewToggle');
+      if (toggle) {
+        toggle.checked = true;
+      }
+
+      console.log('Authenticated scan complete');
     }
-
-    console.log('Authenticated scan complete');
   } catch (error) {
     console.error('Authenticated scan failed:', error);
     showError('authScanError', `Scan failed: ${error.message}`);
@@ -1813,6 +1858,16 @@ function handleViewToggle(checked) {
 function openAuthModal() {
   document.getElementById('authModal').classList.remove('hidden');
   document.body.style.overflow = 'hidden';
+
+  // Update modal description based on mode
+  const description = document.querySelector('.auth-modal-description');
+  if (description) {
+    if (state.enterpriseMode) {
+      description.textContent = 'Enter your session credentials to scan for both logged-out and logged-in data exposure.';
+    } else {
+      description.textContent = 'Enter your session credentials to scan as a logged-in user.';
+    }
+  }
 }
 
 // Close the auth credentials modal
@@ -2181,14 +2236,19 @@ function renderTabFilter() {
   let filtersHtml = '';
 
   // Add view toggle for logged-in/logged-out switching
-  const isLoggedIn = state.currentView === 'logged-in';
-  filtersHtml += `
-    <label class="filter-toggle view-filter">
-      <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
-      <span class="toggle-slider"></span>
-      <span class="toggle-label">${isLoggedIn ? 'Logged In' : 'Logged Out'}</span>
-    </label>
-  `;
+  // In enterprise mode: only show after scans complete (hasAuthData)
+  // In normal mode: always show (allows triggering auth modal)
+  const showViewToggle = state.enterpriseMode ? state.hasAuthData : true;
+  if (showViewToggle) {
+    const isLoggedIn = state.currentView === 'logged-in';
+    filtersHtml += `
+      <label class="filter-toggle view-filter">
+        <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
+        <span class="toggle-slider"></span>
+        <span class="toggle-label">${isLoggedIn ? 'Logged In' : 'Logged Out'}</span>
+      </label>
+    `;
+  }
 
   if (state.activeTab === 'tables') {
     // Data tables filter - use correct sensitivity data based on current view
@@ -2197,7 +2257,6 @@ function renderTabFilter() {
     const sensitiveCount = Object.values(sensitivityData).filter(s =>
       s.sensitivity === 'high' || s.sensitivity === 'moderate'
     ).length;
-    console.log(`renderTabFilter: useLoggedIn=${useLoggedIn}, sensitivityData keys=${Object.keys(sensitivityData).length}, sensitiveCount=${sensitiveCount}`);
     filtersHtml += `
       <label class="filter-toggle">
         <input type="checkbox" id="sensitivityFilter" ${state.showSensitiveOnly ? 'checked' : ''} onchange="toggleSensitivityFilter()">
