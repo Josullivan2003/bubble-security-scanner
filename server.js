@@ -458,7 +458,7 @@ app.get('/api/data', async (req, res) => {
 
 // Proxy endpoint for fetching table data via encrypt + worker API
 app.post('/api/fetch-table', async (req, res) => {
-  const { x, y, payload, appName, appUrl } = req.body;
+  const { x, y, payload, appName, appUrl, cookies, userMode } = req.body;
 
   if (!payload || !appName || !appUrl) {
     return res.status(400).json({ error: 'payload, appName, and appUrl are required' });
@@ -468,36 +468,68 @@ app.post('/api/fetch-table', async (req, res) => {
     // Step 1: Call encrypt API to get x, y, z
     const encryptUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/encrypt';
 
-    console.log('Encrypt request payload:', JSON.stringify({ x, y, payload }, null, 2));
+    console.log('\n========== FETCH-TABLE REQUEST ==========');
+    console.log('[1] INCOMING REQUEST FROM FRONTEND:');
+    console.log('    appName:', appName);
+    console.log('    appUrl:', appUrl);
+    console.log('    cookies:', cookies || '(none)');
+    console.log('    userMode:', userMode || false);
+    console.log('    x:', x);
+    console.log('    y:', y);
+    console.log('    payload:', JSON.stringify(payload, null, 2));
+
+    // If userMode, include appname in encrypt request
+    const encryptRequestBody = userMode
+      ? { x, y, payload, appname: appName }
+      : { x, y, payload };
+    console.log('\n[2] SENDING TO ENCRYPT API:', encryptUrl);
+    console.log('    Request body:', JSON.stringify(encryptRequestBody, null, 2));
 
     const encryptResponse = await fetch(encryptUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ x, y, payload }),
+      body: JSON.stringify(encryptRequestBody),
     });
 
     const encryptData = await encryptResponse.json();
-    console.log('Encrypt response:', JSON.stringify(encryptData, null, 2));
+    console.log('\n[3] RECEIVED FROM ENCRYPT API:');
+    console.log('    success:', encryptData.success);
+    console.log('    x:', encryptData.x);
+    console.log('    y:', encryptData.y);
+    console.log('    z:', encryptData.z || '(none)');
 
     if (!encryptData.z) {
       throw new Error('Encryption failed - no z value returned');
     }
 
     // Step 2: Send x, y, z to worker API
-    // Worker always uses 99reviews endpoint - the encrypted payload contains the target app details
-    const workerUrl = 'https://api-worker.james-a7a.workers.dev';
+    // Use auth-worker for user mode, api-worker for anonymous mode
+    const workerUrl = userMode
+      ? 'https://auth-worker.james-a7a.workers.dev/'
+      : 'https://api-worker.james-a7a.workers.dev';
+
+    // Build dynamic elasticsearch URL from app URL when in user mode
+    const appUrlObj = new URL(appUrl);
+    const dynamicElasticsearchUrl = `${appUrlObj.origin}/version-live/elasticsearch/search`;
 
     const workerPayload = {
       x: encryptData.x,
       y: encryptData.y,
       z: encryptData.z,
-      appname: '99reviews-43419',
-      url: 'https://99reviews.io/version-test/elasticsearch/search',
+      appname: userMode ? appName : '99reviews-43419',
+      url: userMode ? dynamicElasticsearchUrl : 'https://99reviews.io/version-test/elasticsearch/search',
+      ...(cookies && { cookies }),
     };
 
-    console.log('Worker request payload:', JSON.stringify(workerPayload, null, 2));
+    console.log('\n[4] SENDING TO WORKER API:', workerUrl);
+    console.log('    appname:', workerPayload.appname);
+    console.log('    url:', workerPayload.url);
+    console.log('    cookies:', workerPayload.cookies || '(none)');
+    console.log('    x:', workerPayload.x);
+    console.log('    y:', workerPayload.y);
+    console.log('    z:', workerPayload.z.substring(0, 50) + '...');
 
     const workerResponse = await fetch(workerUrl, {
       method: 'POST',
@@ -508,11 +540,168 @@ app.post('/api/fetch-table', async (req, res) => {
     });
 
     const data = await workerResponse.json();
-    console.log('Worker response:', JSON.stringify(data, null, 2).substring(0, 1500));
+    console.log('\n[5] RECEIVED FROM WORKER API:');
+    console.log('    status:', data.status || 'N/A');
+    console.log('    hits:', data.hits?.hits?.length || data.body?.hits?.hits?.length || 0, 'records');
+    console.log('========== END FETCH-TABLE ==========\n');
     res.json(data);
   } catch (error) {
     console.error('Fetch table error:', error);
     res.status(500).json({ error: 'Failed to fetch table data', details: error.message });
+  }
+});
+
+// Endpoint for getting accurate table counts via aggregate API (logged-out)
+app.post('/api/aggregate-count', async (req, res) => {
+  const { x, y, appName, tableType } = req.body;
+
+  if (!x || !y || !appName || !tableType) {
+    return res.status(400).json({ error: 'x, y, appName, and tableType are required' });
+  }
+
+  try {
+    // Step 1: Call aggregate API to get encrypted params
+    const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
+
+    const aggregateResponse = await fetch(aggregateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x,
+        y,
+        appname: '99reviews-43419',
+        target_appname: appName,
+        type: tableType,
+      }),
+    });
+
+    const aggregateData = await aggregateResponse.json();
+
+    if (!aggregateData.z) {
+      return res.json({ count: 0, error: 'Failed to get aggregate params' });
+    }
+
+    // Step 2: Call aggregate-worker to get the count
+    const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: aggregateData.x,
+        y: aggregateData.y,
+        z: aggregateData.z,
+        url: 'https://99reviews.io/elasticsearch/maggregate',
+      }),
+    });
+
+    const workerData = await workerResponse.json();
+
+    // Extract count from response - can be in multiple places
+    const count = workerData.count ||
+                  workerData.body?.responses?.[0]?.count ||
+                  workerData.body?.aggregations?.agg?.value ||
+                  0;
+
+    if (count === 0 && workerData.status !== 200) {
+      console.log(`[Aggregate] ${tableType}: Worker returned status ${workerData.status}`);
+    }
+
+    res.json({ count });
+  } catch (error) {
+    console.error('Aggregate count error:', error);
+    res.status(500).json({ error: 'Failed to get aggregate count', details: error.message });
+  }
+});
+
+// Endpoint for getting accurate table counts via aggregate API (logged-in with cookies)
+app.post('/api/aggregate-count-auth', async (req, res) => {
+  const { x, y, appName, appUrl, tableType, cookies } = req.body;
+
+  if (!x || !y || !appName || !appUrl || !tableType) {
+    return res.status(400).json({ error: 'x, y, appName, appUrl, and tableType are required' });
+  }
+
+  try {
+    // Step 1: Call aggregate API to get z (using user's x, y, appname)
+    const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
+
+    const aggregateRequestBody = {
+      x,
+      y,
+      appname: appName,
+      type: tableType,
+    };
+
+    // Debug logging for specific tables
+    const isDebugTable = tableType.includes('expense');
+    if (isDebugTable) {
+      console.log(`\n[Aggregate-Auth DEBUG] ${tableType}:`);
+      console.log('  Step 1 request:', JSON.stringify(aggregateRequestBody, null, 2));
+    }
+
+    const aggregateResponse = await fetch(aggregateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aggregateRequestBody),
+    });
+
+    const aggregateData = await aggregateResponse.json();
+
+    if (isDebugTable) {
+      console.log('  Step 1 response:', JSON.stringify(aggregateData, null, 2).substring(0, 500));
+    }
+
+    if (!aggregateData.z) {
+      console.log(`[Aggregate-Auth] ${tableType}: No z returned from Step 1`);
+      return res.json({ count: 0, error: 'Failed to get aggregate params' });
+    }
+
+    // Step 2: Call aggregate-worker with user's x, y, z, url, and cookies
+    const appUrlObj = new URL(appUrl);
+    const maggregateUrl = `${appUrlObj.origin}/elasticsearch/maggregate`;
+
+    const workerRequestBody = {
+      x,
+      y,
+      z: aggregateData.z,
+      url: maggregateUrl,
+      ...(cookies && { cookies }),
+    };
+
+    if (isDebugTable) {
+      console.log('  Step 2 URL:', maggregateUrl);
+      console.log('  Step 2 request (truncated z):', { ...workerRequestBody, z: workerRequestBody.z.substring(0, 50) + '...' });
+    }
+
+    const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(workerRequestBody),
+    });
+
+    const workerData = await workerResponse.json();
+
+    if (isDebugTable) {
+      console.log('  Step 2 response:', JSON.stringify(workerData, null, 2).substring(0, 1000));
+    }
+
+    // Extract count from response
+    const count = workerData.count ||
+                  workerData.body?.responses?.[0]?.count ||
+                  workerData.body?.aggregations?.agg?.value ||
+                  0;
+
+    if (isDebugTable) {
+      console.log('  Extracted count:', count);
+    }
+
+    if (count === 0 && workerData.status !== 200) {
+      console.log(`[Aggregate-Auth] ${tableType}: Worker returned status ${workerData.status}`);
+    }
+
+    res.json({ count, authenticated: workerData.authenticated });
+  } catch (error) {
+    console.error('Aggregate count auth error:', error);
+    res.status(500).json({ error: 'Failed to get aggregate count', details: error.message });
   }
 });
 
@@ -607,6 +796,142 @@ app.post('/api/app-plan', async (req, res) => {
   } catch (error) {
     console.error(`[App Plan] Error:`, error.message);
     res.status(500).json({ error: 'Failed to fetch app plan', details: error.message });
+  }
+});
+
+// API endpoint to extract session cookies from a Bubble app
+app.post('/api/extract-cookies', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  console.log(`[Extract Cookies] Navigating to: ${url}`);
+
+  let browser = null;
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      throw new Error('No browser available');
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    // Wait for Bubble's app to initialize
+    try {
+      await page.waitForFunction(() => window.appquery || window.app, { timeout: 10000 });
+    } catch (e) {
+      // Continue anyway - app may not be fully loaded
+    }
+
+    // Wait a moment for cookies and user data to be set
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Extract user info from Bubble's JavaScript context
+    const userInfo = await page.evaluate(() => {
+      try {
+        let user = null;
+
+        // Try different Bubble user object locations
+        if (window.current_user && typeof window.current_user === 'function') {
+          user = window.current_user();
+        } else if (window.current_user) {
+          user = window.current_user;
+        } else if (window.appquery && typeof window.appquery.current_user === 'function') {
+          user = window.appquery.current_user();
+        } else if (window.app && window.app.current_user) {
+          user = typeof window.app.current_user === 'function'
+            ? window.app.current_user()
+            : window.app.current_user;
+        }
+
+        if (user && user._id) {
+          return {
+            isLoggedIn: true,
+            id: user._id || null,
+            email: user.authentication?.email?.email || user.email || null,
+          };
+        }
+      } catch (e) {}
+      return { isLoggedIn: false, id: null, email: null };
+    });
+
+    // Extract all cookies for this page
+    const allCookies = await page.cookies();
+    await browser.close();
+
+    // Get app name from meta API
+    const baseUrl = new URL(url).origin;
+    let appName = null;
+    try {
+      const metaResponse = await fetch(`${baseUrl}/api/1.1/meta`);
+      const metaData = await metaResponse.json();
+      appName = metaData.app_data?.appname;
+    } catch (e) {
+      // Fallback: detect app name from cookie names
+      const bubbleCookie = allCookies.find(c => c.name.includes('_u1main') || c.name.includes('_u2main'));
+      if (bubbleCookie) {
+        appName = bubbleCookie.name.split('_')[0];
+      }
+    }
+
+    // Filter cookies to only include those starting with the app name
+    const appCookies = appName
+      ? allCookies.filter(c => c.name.startsWith(appName))
+      : allCookies;
+
+    // Sort cookies: u1main first, then u2main, then u2main.sig
+    const sortedCookies = appCookies.sort((a, b) => {
+      const order = (name) => {
+        if (name.includes('_u1main') || name.includes('_u1_')) return 0;
+        if (name.includes('_u2main') && !name.includes('.sig')) return 1;
+        if (name.includes('.sig')) return 2;
+        return 3;
+      };
+      return order(a.name) - order(b.name);
+    });
+
+    // Format cookies as a string for the worker
+    const cookieString = sortedCookies
+      .map(c => `${c.name}=${c.value}`)
+      .join('; ');
+
+    // Also return structured data for debugging/display
+    const sessionCookies = sortedCookies.filter(c =>
+      c.name.includes('_u2main') ||
+      c.name.includes('_u1main') ||
+      c.name.includes('_u1_') ||
+      c.name.includes('.sig')
+    );
+
+    console.log(`[Extract Cookies] App: ${appName}, Found ${allCookies.length} cookies, ${sortedCookies.length} app cookies, logged in: ${userInfo.isLoggedIn}`);
+
+    res.json({
+      cookies: cookieString,
+      cookieCount: sortedCookies.length,
+      sessionCookies: sessionCookies.map(c => ({ name: c.name, domain: c.domain })),
+      hasSession: sessionCookies.length > 0,
+      user: userInfo,
+    });
+
+  } catch (error) {
+    if (browser) await browser.close();
+    console.error(`[Extract Cookies] Error:`, error.message);
+    res.status(500).json({ error: 'Failed to extract cookies', details: error.message });
   }
 });
 
@@ -788,7 +1113,7 @@ async function scanAppInfo(url) {
 
 // Full audit endpoint - returns AI summary of sensitive data
 app.post('/api/audit', async (req, res) => {
-  const { url, x, y } = req.body;
+  const { url, x, y, cookies } = req.body;
 
   if (!url) {
     return res.status(400).json({ error: 'URL is required' });
@@ -858,6 +1183,7 @@ app.post('/api/audit', async (req, res) => {
           if (!encryptData.z) return null;
 
           // Fetch via worker
+          const elasticsearchUrl = `${baseUrl}/version-live/elasticsearch/search`;
           const workerResponse = await fetch('https://api-worker.james-a7a.workers.dev', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -865,8 +1191,9 @@ app.post('/api/audit', async (req, res) => {
               x: encryptData.x,
               y: encryptData.y,
               z: encryptData.z,
-              appname: '99reviews-43419',
-              url: 'https://99reviews.io/version-test/elasticsearch/search',
+              appname: appName,
+              url: elasticsearchUrl,
+              ...(cookies && { cookies }),
             }),
           });
 

@@ -15,6 +15,27 @@ let state = {
   results: [],
   xValue: 'p1w5CLCS+ngwPIcoMz8rpaTc/CREf7bx11VJEJtnKrc=',
   yValue: 'izOeimelvrYvr1RJO0/K2w==',
+  cookies: '',                        // Session cookies (for logged-out scan)
+  useCookies: false,                  // Don't send cookies for logged-out scan
+  userMode: false,                    // If true, show auth scan section (from URL param user=yes)
+  // Authenticated scan state
+  authXValue: '',                     // X value for authenticated scan
+  authYValue: '',                     // Y value for authenticated scan
+  authCookies: '',                    // Cookies for authenticated scan
+  currentView: 'logged-out',          // 'logged-out' | 'logged-in'
+  hasAuthData: false,                 // Whether authenticated scan has been run
+  // Logged-out data (default scan) - stored for comparison
+  loggedOutData: {
+    tableSensitivity: {},
+    allColumnSensitivity: {},
+    tableRecordCounts: {},
+  },
+  // Logged-in data (authenticated scan)
+  loggedInData: {
+    tableSensitivity: {},
+    allColumnSensitivity: {},
+    tableRecordCounts: {},
+  },
   sortColumn: null,
   sortDirection: 'asc',
   hiddenColumns: [],
@@ -76,6 +97,10 @@ function parseUrlParams() {
   }
   if (params.y) {
     state.yValue = params.y;
+  }
+  if (params.user === 'yes') {
+    state.userMode = true;
+    console.log('User mode enabled - auth scan section will be shown');
   }
 
   // Auto-populate and trigger scan if app URL provided
@@ -359,16 +384,19 @@ async function fetchTableSample(tableId) {
   };
 
   try {
+    // Logged-out scan: no cookies, no userMode
+    const requestBody = {
+      x: state.xValue,
+      y: state.yValue,
+      payload: payload,
+      appName: state.appName,
+      appUrl: state.bubbleUrl,
+    };
+    console.log('fetchTableSample (logged-out) sending:', { x: state.xValue, y: state.yValue });
     const response = await fetch('/api/fetch-table', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        x: state.xValue,
-        y: state.yValue,
-        payload: payload,
-        appName: state.appName,
-        appUrl: state.bubbleUrl,
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await response.json();
@@ -416,6 +444,7 @@ function extractColumnsWithSamples(results) {
 // Toggle sensitivity filter
 function toggleSensitivityFilter() {
   state.showSensitiveOnly = document.getElementById('sensitivityFilter').checked;
+  renderTabFilter(); // Update the toggle label
   renderTableList();
   // Also re-render results table if viewing one
   if (state.results.length > 0) {
@@ -458,67 +487,90 @@ function getTableType(tableId) {
   return `custom.${tableId}`;
 }
 
-// Fetch record count for a single table
+// Fetch record count for a single table using aggregate API
 async function fetchTableCount(tableId) {
+  const tableType = getTableType(tableId);
+
+  // Use aggregate API for accurate counts
+  const response = await fetch('/api/aggregate-count', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      x: state.xValue,
+      y: state.yValue,
+      appName: state.appName,
+      tableType: tableType,
+    }),
+  });
+
+  const data = await response.json();
+
+  if (data.error || data.count === 0) {
+    return { count: 0, metadataOnly: false };
+  }
+
+  // If we have a count, fetch a small sample to check if metadata-only
+  const metadataOnly = await checkMetadataOnly(tableId);
+
+  return { count: data.count, metadataOnly };
+}
+
+// Check if a table only contains metadata (no real data fields)
+async function checkMetadataOnly(tableId) {
   const payload = {
     app_version: 'live',
     appname: state.appName,
     constraints: [],
     from: 0,
-    n: 10000,
+    n: 5, // Just fetch a small sample
     search_path: '{"constructor_name":"DataSource","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0.%p.%ds"},{"type":"node","value":{"constructor_name":"Element","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0"}]}},{"type":"raw","value":"Search"}]}',
     situation: 'initial search',
     sorts_list: [],
     type: getTableType(tableId),
   };
 
-  const response = await fetch('/api/fetch-table', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      x: state.xValue,
-      y: state.yValue,
-      payload: payload,
-      appName: state.appName,
-      appUrl: state.bubbleUrl,
-    }),
-  });
-
-  const data = await response.json();
-
-  // Check for error status
-  if (data.status && data.status >= 400) {
-    return { count: 0, metadataOnly: false };
-  }
-
-  // Count hits array length and check for metadata-only records
-  if (data.body && data.body.hits && Array.isArray(data.body.hits.hits)) {
-    const hits = data.body.hits.hits;
-    const count = hits.length;
-
-    // Check if all records only have metadata fields (_id only, no real data)
-    const metadataFields = ['_id', '_type', '_version'];
-    const metadataOnly = count > 0 && hits.every(hit => {
-      const sourceFields = Object.keys(hit._source || {});
-      // Filter out metadata fields to see if there's any real data
-      const dataFields = sourceFields.filter(f => !metadataFields.includes(f));
-      return dataFields.length === 0;
+  try {
+    const response = await fetch('/api/fetch-table', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.xValue,
+        y: state.yValue,
+        payload: payload,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+      }),
     });
 
-    // If we hit the 400 limit and at_end is false, there are more records
-    if (count >= 400 && data.body.at_end === false) {
-      return { count: '400+', metadataOnly };
+    const data = await response.json();
+
+    if (data.body && data.body.hits && Array.isArray(data.body.hits.hits)) {
+      const hits = data.body.hits.hits;
+      if (hits.length === 0) return false;
+
+      const metadataFields = ['_id', '_type', '_version'];
+      return hits.every(hit => {
+        const sourceFields = Object.keys(hit._source || {});
+        const dataFields = sourceFields.filter(f => !metadataFields.includes(f));
+        return dataFields.length === 0;
+      });
     }
-    return { count, metadataOnly };
+  } catch (e) {
+    console.error('Error checking metadata:', e);
   }
 
-  return { count: 0, metadataOnly: false };
+  return false;
 }
 
 // Render the table selection list
 function renderTableList() {
   const container = document.getElementById('tableList');
   container.innerHTML = '';
+
+  // Get the appropriate sensitivity data based on current view
+  const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+  const sensitivityData = useLoggedIn ? state.loggedInData.tableSensitivity : state.tableSensitivity;
+  const recordCounts = useLoggedIn ? state.loggedInData.tableRecordCounts : null;
 
   // Sort tables alphabetically by display name
   let sortedTables = [...state.tables].sort((a, b) =>
@@ -528,42 +580,48 @@ function renderTableList() {
   // Filter to show only sensitive tables if toggle is on
   if (state.showSensitiveOnly && !state.sensitivityLoading) {
     sortedTables = sortedTables.filter(table => {
-      const sensitivityData = state.tableSensitivity[table.id];
-      return sensitivityData && (sensitivityData.sensitivity === 'high' || sensitivityData.sensitivity === 'moderate');
+      const tableSensitivity = sensitivityData[table.id];
+      return tableSensitivity && (tableSensitivity.sensitivity === 'high' || tableSensitivity.sensitivity === 'moderate');
     });
   }
 
   sortedTables.forEach((table) => {
     const item = document.createElement('div');
-    const hasRecords = table.recordCount !== undefined && table.recordCount !== 0 && table.recordCount !== '0';
-    const hasRealData = hasRecords && !table.metadataOnly;
+    // Use logged-in record counts if available, otherwise use default
+    const displayCount = recordCounts && recordCounts[table.id] !== undefined
+      ? recordCounts[table.id]
+      : table.recordCount;
+    const hasRecords = displayCount !== undefined && displayCount !== 0 && displayCount !== '0';
+    // For logged-in view, if we have records, we know it's real data (metadataOnly was already filtered)
+    // For logged-out view, use the metadataOnly flag
+    const hasRealData = useLoggedIn ? hasRecords : (hasRecords && !table.metadataOnly);
 
     item.className = 'table-item' + (hasRealData ? '' : ' disabled');
     item.dataset.tableId = table.id;
 
     // Sensitivity indicator or loading spinner (left side)
     // Only show loading spinner for tables with data (count > 0)
-    if (state.sensitivityLoading && hasRealData) {
-      // Show loading spinner while analyzing
+    if (state.sensitivityLoading && hasRealData && !useLoggedIn) {
+      // Show loading spinner while analyzing (only for logged-out scan)
       const loadingIcon = document.createElement('span');
       loadingIcon.className = 'sensitivity-indicator sensitivity-loading-icon';
       loadingIcon.innerHTML = '<div class="spinner-tiny"></div>';
       loadingIcon.title = 'Analyzing sensitivity...';
       item.appendChild(loadingIcon);
     } else {
-      const sensitivityData = state.tableSensitivity[table.id];
-      if (sensitivityData && sensitivityData.sensitivity !== 'low') {
+      const tableSensitivity = sensitivityData[table.id];
+      if (tableSensitivity && tableSensitivity.sensitivity !== 'low') {
         const sensitivityIcon = document.createElement('span');
         sensitivityIcon.className = 'sensitivity-indicator';
 
-        if (sensitivityData.sensitivity === 'high') {
+        if (tableSensitivity.sensitivity === 'high') {
           sensitivityIcon.classList.add('sensitivity-high');
           sensitivityIcon.innerHTML = '!';
-          sensitivityIcon.title = `Highly Sensitive: ${sensitivityData.reason}`;
-        } else if (sensitivityData.sensitivity === 'moderate') {
+          sensitivityIcon.title = `Highly Sensitive: ${tableSensitivity.reason}`;
+        } else if (tableSensitivity.sensitivity === 'moderate') {
           sensitivityIcon.classList.add('sensitivity-moderate');
           sensitivityIcon.innerHTML = '!';
-          sensitivityIcon.title = `Moderately Sensitive: ${sensitivityData.reason}`;
+          sensitivityIcon.title = `Moderately Sensitive: ${tableSensitivity.reason}`;
         }
 
         item.appendChild(sensitivityIcon);
@@ -578,10 +636,12 @@ function renderTableList() {
     item.appendChild(nameSpan);
 
     // Badge with count
-    if (table.recordCount !== undefined) {
+    if (displayCount !== undefined) {
       const badge = document.createElement('span');
       badge.className = 'badge';
-      badge.textContent = table.metadataOnly ? 0 : table.recordCount;
+      // For logged-in view, use the count directly (metadataOnly was from logged-out scan)
+      // For logged-out view, show 0 if metadataOnly
+      badge.textContent = useLoggedIn ? displayCount : (table.metadataOnly ? 0 : displayCount);
       item.appendChild(badge);
     }
 
@@ -625,21 +685,25 @@ async function selectTable(tableId, displayName) {
     };
 
     // Call fetch-table endpoint (encrypt + worker API)
+    // Use authenticated credentials if viewing logged-in data
+    const useAuth = state.currentView === 'logged-in' && state.hasAuthData;
     const response = await fetch('/api/fetch-table', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        x: state.xValue,
-        y: state.yValue,
+        x: useAuth ? state.authXValue : state.xValue,
+        y: useAuth ? state.authYValue : state.yValue,
         payload: payload,
         appName: state.appName,
         appUrl: state.bubbleUrl,
+        ...(useAuth && { cookies: state.authCookies, userMode: true }),
       }),
     });
 
     const data = await response.json();
+    console.log('selectTable API response for', tableId, ':', JSON.stringify(data).substring(0, 500));
 
     if (data.error) {
       throw new Error(data.error);
@@ -652,6 +716,7 @@ async function selectTable(tableId, displayName) {
 
     // Parse results
     state.results = parseResults(data);
+    console.log('selectTable parsed results count:', state.results.length);
 
     // Check if there are more records than returned (400+ case)
     const hasMore = data.body && data.body.at_end === false && state.results.length >= 400;
@@ -1014,9 +1079,15 @@ async function analyzeColumnSensitivity() {
   if (state.results.length === 0) return;
 
   // Check if we already have cached column sensitivity from initial analysis
-  if (state.allColumnSensitivity[state.selectedTable]) {
-    console.log('Using cached column sensitivity for:', state.selectedTable);
-    state.columnSensitivity = state.allColumnSensitivity[state.selectedTable];
+  // Use the appropriate cache based on current view
+  const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+  const columnSensitivityCache = useLoggedIn
+    ? state.loggedInData.allColumnSensitivity
+    : state.allColumnSensitivity;
+
+  if (columnSensitivityCache[state.selectedTable]) {
+    console.log(`Using cached column sensitivity for: ${state.selectedTable} (${useLoggedIn ? 'logged-in' : 'logged-out'})`);
+    state.columnSensitivity = columnSensitivityCache[state.selectedTable];
     state.columnSensitivityLoading = false;
     renderResultsTable();
     return;
@@ -1097,8 +1168,13 @@ async function analyzeColumnSensitivity() {
       });
     }
 
-    // Also cache for future use
-    state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+    // Also cache for future use in the appropriate cache
+    const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+    if (useLoggedIn) {
+      state.loggedInData.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+    } else {
+      state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+    }
 
     // Hide loading state and re-render table to show indicators
     state.columnSensitivityLoading = false;
@@ -1406,6 +1482,457 @@ function hideError(elementId) {
   document.getElementById(elementId).classList.add('hidden');
 }
 
+// Run authenticated scan with user-provided x, y, and cookies
+async function runAuthenticatedScan() {
+  const payloadInput = document.getElementById('authPayloadInput');
+  const cookieInput = document.getElementById('authCookieInput');
+
+  const rawPayload = payloadInput ? payloadInput.value.trim() : '';
+  const rawCookies = cookieInput ? cookieInput.value.trim() : '';
+
+  // Validate inputs
+  if (!rawPayload) {
+    showError('authScanError', 'Please paste the request payload JSON');
+    return;
+  }
+  if (!rawCookies) {
+    showError('authScanError', 'Please paste your session cookies');
+    return;
+  }
+
+  // Parse the payload JSON to extract x and y
+  let xValue, yValue;
+  try {
+    const payload = JSON.parse(rawPayload);
+    xValue = payload.x;
+    yValue = payload.y;
+    if (!xValue || !yValue) {
+      showError('authScanError', 'Payload JSON must contain both "x" and "y" values');
+      return;
+    }
+  } catch (e) {
+    showError('authScanError', 'Invalid JSON payload. Please paste the complete payload from the Network tab.');
+    return;
+  }
+
+  // Parse cookies
+  const cookies = parseCookieInput(rawCookies);
+  if (!cookies) {
+    showError('authScanError', 'Could not parse cookies. Please paste the cookie values from DevTools.');
+    return;
+  }
+
+  // Validate required auth cookies
+  const hasU1 = cookies.match(/_u1main=/);
+  const hasLiveU2 = cookies.includes('_live_u2main=');
+  const hasLiveSig = cookies.includes('_live_u2main.sig=');
+
+  if (!hasU1 || !hasLiveU2 || !hasLiveSig) {
+    const missing = [];
+    if (!hasU1) missing.push('{appname}_u1main');
+    if (!hasLiveU2) missing.push('{appname}_live_u2main');
+    if (!hasLiveSig) missing.push('{appname}_live_u2main.sig');
+    showError('authScanError', `Missing required cookies: ${missing.join(', ')}`);
+    return;
+  }
+
+  hideError('authScanError');
+
+  // Store authenticated credentials
+  state.authXValue = xValue;
+  state.authYValue = yValue;
+  state.authCookies = cookies;
+
+  console.log('Running authenticated scan with:', { x: xValue, y: yValue, cookies: cookies.substring(0, 50) + '...' });
+
+  // Disable button during scan
+  const btn = document.getElementById('runAuthScanBtn');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+
+  try {
+    // Run authenticated sensitivity analysis
+    await runAuthenticatedAnalysis();
+
+    // Mark that we have auth data
+    state.hasAuthData = true;
+
+    // Close the modal
+    closeAuthModal();
+
+    // Switch to logged-in view (will now show data since hasAuthData is true)
+    switchView('logged-in');
+
+    // Update the toggle to show logged-in state
+    const toggle = document.getElementById('viewToggle');
+    if (toggle) {
+      toggle.checked = true;
+    }
+
+    console.log('Authenticated scan complete');
+  } catch (error) {
+    console.error('Authenticated scan failed:', error);
+    showError('authScanError', `Scan failed: ${error.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run Scan';
+  }
+}
+
+// Run sensitivity analysis with authenticated credentials
+async function runAuthenticatedAnalysis() {
+  // Scan ALL tables (not just those with logged-out data)
+  // because some tables may only be visible to logged-in users
+  // Include ALL tables - don't filter by metadataOnly since that was based on logged-out access
+  // Authenticated users may have access to data in tables that were metadata-only for anonymous users
+  const allTables = state.tables;
+
+  if (allTables.length === 0) {
+    console.log('No tables to analyze');
+    return;
+  }
+
+  console.log(`Running authenticated analysis for ${allTables.length} tables (including ${state.tables.filter(t => t.metadataOnly).length} that were metadata-only for logged-out)`);
+
+  // Reset logged-in data
+  state.loggedInData = {
+    tableSensitivity: {},
+    allColumnSensitivity: {},
+    tableRecordCounts: {},
+  };
+
+  // First, fetch record counts for all tables with authenticated credentials
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < allTables.length; i += BATCH_SIZE) {
+    const batch = allTables.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(table => fetchAuthenticatedTableCount(table)));
+  }
+
+  // Then analyze tables that have data
+  const tablesWithAuthData = allTables.filter(table => {
+    const count = state.loggedInData.tableRecordCounts[table.id];
+    // Handle both numeric counts and '400+' string
+    return count && (count === '400+' || count > 0);
+  });
+
+  console.log(`Found ${tablesWithAuthData.length} tables with authenticated data`);
+
+  for (let i = 0; i < tablesWithAuthData.length; i += BATCH_SIZE) {
+    const batch = tablesWithAuthData.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(table => analyzeTableAuthenticated(table)));
+  }
+}
+
+// Fetch record count for a table with authenticated credentials using aggregate API
+async function fetchAuthenticatedTableCount(table) {
+  const tableType = getTableType(table.id);
+
+  try {
+    // Use authenticated aggregate API for accurate counts
+    const response = await fetch('/api/aggregate-count-auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.authXValue,
+        y: state.authYValue,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+        tableType: tableType,
+        cookies: state.authCookies,
+      }),
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.log(`Auth table ${table.id}: error - ${data.error}`);
+      state.loggedInData.tableRecordCounts[table.id] = 0;
+      return;
+    }
+
+    // Store the count (even if 0)
+    state.loggedInData.tableRecordCounts[table.id] = data.count || 0;
+    console.log(`Auth table ${table.id}: ${data.count || 0} records`);
+  } catch (error) {
+    console.error(`Failed to fetch auth count for ${table.id}:`, error);
+    state.loggedInData.tableRecordCounts[table.id] = 0;
+  }
+}
+
+// Analyze a single table with authenticated credentials
+async function analyzeTableAuthenticated(table) {
+  try {
+    // Fetch sample data using authenticated credentials
+    const sampleData = await fetchTableSampleAuthenticated(table.id);
+
+    if (!sampleData || sampleData.length === 0) {
+      console.log(`No authenticated sample data for table: ${table.id}`);
+      return;
+    }
+
+    // Record count is already stored by fetchAuthenticatedTableCount
+
+    // Extract columns and sample values
+    const columnsWithSamples = extractColumnsWithSamples(sampleData);
+
+    if (columnsWithSamples.length === 0) {
+      return;
+    }
+
+    // Call column-level analysis API
+    const response = await fetch('/api/analyze-columns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tableName: table.id,
+        columnsWithSamples: columnsWithSamples
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error(`Authenticated column analysis failed for ${table.id}:`, data.error);
+      return;
+    }
+
+    // Store column sensitivity
+    const columnSensitivity = {};
+    let highestSensitivity = 'low';
+    const sensitiveFields = [];
+
+    if (data.fields && Array.isArray(data.fields)) {
+      data.fields.forEach(field => {
+        columnSensitivity[field.name] = field.sensitivity;
+        sensitiveFields.push(field.name);
+
+        if (field.sensitivity === 'high') {
+          highestSensitivity = 'high';
+        } else if (field.sensitivity === 'moderate' && highestSensitivity !== 'high') {
+          highestSensitivity = 'moderate';
+        }
+      });
+    }
+
+    state.loggedInData.allColumnSensitivity[table.id] = columnSensitivity;
+
+    if (highestSensitivity !== 'low') {
+      state.loggedInData.tableSensitivity[table.id] = {
+        sensitivity: highestSensitivity,
+        reason: `Contains ${highestSensitivity === 'high' ? 'highly' : 'moderately'} sensitive fields`
+      };
+    }
+  } catch (error) {
+    console.error(`Error in authenticated analysis for ${table.id}:`, error);
+  }
+}
+
+// Fetch table sample with authenticated credentials
+async function fetchTableSampleAuthenticated(tableId) {
+  const payload = {
+    app_version: 'live',
+    appname: state.appName,
+    constraints: [],
+    from: 0,
+    n: 5,
+    search_path: '{"constructor_name":"DataSource","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0.%p.%ds"},{"type":"node","value":{"constructor_name":"Element","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0"}]}},{"type":"raw","value":"Search"}]}',
+    situation: 'initial search',
+    sorts_list: [],
+    type: getTableType(tableId),
+  };
+
+  try {
+    const response = await fetch('/api/fetch-table', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.authXValue,
+        y: state.authYValue,
+        payload: payload,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+        cookies: state.authCookies,
+        userMode: true,
+      }),
+    });
+
+    const data = await response.json();
+    return parseResults(data);
+  } catch (error) {
+    console.error(`Failed to fetch authenticated sample for ${tableId}:`, error);
+    return [];
+  }
+}
+
+// Switch between logged-out and logged-in views
+function switchView(view) {
+  state.currentView = view;
+
+  // Update the checkbox toggle state
+  const toggle = document.getElementById('viewToggle');
+  if (toggle) {
+    toggle.checked = view === 'logged-in';
+  }
+
+  // Update the toggle label
+  renderTabFilter();
+
+  console.log(`Switched to ${view} view`);
+
+  // Re-render table list with appropriate data
+  renderTableList();
+
+  // If a table is selected, refresh its data view
+  if (state.selectedTable) {
+    const selectedTableData = state.tables.find(t => t.id === state.selectedTable);
+    if (selectedTableData) {
+      selectTable(state.selectedTable, selectedTableData.display);
+    }
+  }
+}
+
+// Handle the view toggle checkbox change
+function handleViewToggle(checked) {
+  if (checked) {
+    // Switching to logged-in
+    if (!state.hasAuthData) {
+      // No auth data yet - show the modal
+      openAuthModal();
+      // Don't switch view yet - wait for successful scan
+      return;
+    }
+    // Has auth data - switch view
+    switchView('logged-in');
+  } else {
+    // Switching to logged-out
+    switchView('logged-out');
+  }
+}
+
+// Open the auth credentials modal
+function openAuthModal() {
+  document.getElementById('authModal').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+// Close the auth credentials modal
+function closeAuthModal() {
+  document.getElementById('authModal').classList.add('hidden');
+  document.body.style.overflow = '';
+  hideError('authScanError');
+
+  // Reset the toggle to logged-out if we don't have auth data
+  if (!state.hasAuthData) {
+    const toggle = document.getElementById('viewToggle');
+    if (toggle) {
+      toggle.checked = false;
+    }
+  }
+}
+
+// Parse cookie input from various formats
+function parseCookieInput(input) {
+  console.log('parseCookieInput called with:', input.substring(0, 100));
+  const parsedCookies = [];
+
+  // Helper to check if cookie is a live auth cookie (not test/debug variants)
+  function isLiveAuthCookie(name) {
+    // Match: {appname}_u1main (ends with _u1main, not _u1_testmain or _u1_9325ymain)
+    if (name.match(/_u1main$/) && !name.includes('_u1_')) {
+      return true;
+    }
+    // Match: {appname}_live_u2main or {appname}_live_u2main.sig
+    if (name.includes('_live_u2main')) {
+      return true;
+    }
+    return false;
+  }
+
+  // First, check if it's a semicolon-separated cookie string (browser format)
+  if (input.includes(';') && !input.includes('\n')) {
+    const cookies = input.split(';');
+    for (const cookie of cookies) {
+      const trimmed = cookie.trim();
+      if (trimmed.includes('=')) {
+        const eqIndex = trimmed.indexOf('=');
+        const name = trimmed.substring(0, eqIndex).trim();
+        const value = trimmed.substring(eqIndex + 1).trim();
+        if (isLiveAuthCookie(name)) {
+          parsedCookies.push(`${name}=${value}`);
+          console.log('Found live auth cookie:', name);
+        }
+      }
+    }
+  } else {
+    // Split by newlines to handle multiple rows
+    const lines = input.split('\n').map(l => l.trim()).filter(l => l);
+
+    for (const line of lines) {
+      // Check if it's a DevTools tab-separated format
+      if (line.includes('\t')) {
+        const parts = line.split('\t');
+        if (parts.length >= 2) {
+          const name = parts[0].trim();
+          const value = parts[1].trim();
+          if (isLiveAuthCookie(name)) {
+            parsedCookies.push(`${name}=${value}`);
+          }
+        }
+      }
+      // Check if it contains semicolons (multiple cookies on one line)
+      else if (line.includes(';')) {
+        const cookies = line.split(';');
+        for (const cookie of cookies) {
+          const trimmed = cookie.trim();
+          if (trimmed.includes('=')) {
+            const eqIndex = trimmed.indexOf('=');
+            const name = trimmed.substring(0, eqIndex).trim();
+            const value = trimmed.substring(eqIndex + 1).trim();
+            if (isLiveAuthCookie(name)) {
+              parsedCookies.push(`${name}=${value}`);
+            }
+          }
+        }
+      }
+      // Check if it's in name=value format
+      else if (line.includes('=')) {
+        const eqIndex = line.indexOf('=');
+        const name = line.substring(0, eqIndex).trim();
+        const value = line.substring(eqIndex + 1).trim().split(/\s+/)[0];
+        if (isLiveAuthCookie(name)) {
+          parsedCookies.push(`${name}=${value}`);
+        }
+      }
+      // Space separated from DevTools
+      else {
+        const parts = line.split(/\s+/);
+        if (parts.length >= 2) {
+          const name = parts[0];
+          const value = parts[1];
+          if (isLiveAuthCookie(name)) {
+            parsedCookies.push(`${name}=${value}`);
+          }
+        }
+      }
+    }
+  }
+
+  // Sort: u1main first, then live_u2main, then .sig
+  parsedCookies.sort((a, b) => {
+    const order = (s) => {
+      if (s.match(/_u1main=/)) return 0;
+      if (s.includes('_live_u2main=') && !s.includes('.sig')) return 1;
+      if (s.includes('_live_u2main.sig=')) return 2;
+      return 3;
+    };
+    return order(a) - order(b);
+  });
+
+  console.log('Extracted live auth cookies:', parsedCookies);
+  console.log('Final cookie string:', parsedCookies.join('; '));
+  return parsedCookies.length > 0 ? parsedCookies.join('; ') : null;
+}
+
 // Open modal with record details by ID
 function openModalById(recordId) {
   const record = state.results.find(r => r._id === recordId);
@@ -1651,35 +2178,46 @@ function renderTabFilter() {
   const container = document.getElementById('tabFilterContainer');
   if (!container) return;
 
+  let filtersHtml = '';
+
+  // Add view toggle for logged-in/logged-out switching
+  const isLoggedIn = state.currentView === 'logged-in';
+  filtersHtml += `
+    <label class="filter-toggle view-filter">
+      <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
+      <span class="toggle-slider"></span>
+      <span class="toggle-label">${isLoggedIn ? 'Logged In' : 'Logged Out'}</span>
+    </label>
+  `;
+
   if (state.activeTab === 'tables') {
-    // Data tables filter
-    const sensitiveCount = Object.values(state.tableSensitivity).filter(s =>
+    // Data tables filter - use correct sensitivity data based on current view
+    const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+    const sensitivityData = useLoggedIn ? state.loggedInData.tableSensitivity : state.tableSensitivity;
+    const sensitiveCount = Object.values(sensitivityData).filter(s =>
       s.sensitivity === 'high' || s.sensitivity === 'moderate'
     ).length;
-    container.innerHTML = `
+    console.log(`renderTabFilter: useLoggedIn=${useLoggedIn}, sensitivityData keys=${Object.keys(sensitivityData).length}, sensitiveCount=${sensitiveCount}`);
+    filtersHtml += `
       <label class="filter-toggle">
         <input type="checkbox" id="sensitivityFilter" ${state.showSensitiveOnly ? 'checked' : ''} onchange="toggleSensitivityFilter()">
         <span class="toggle-slider"></span>
-        <span class="toggle-label">Show sensitive only (${sensitiveCount})</span>
+        <span class="toggle-label">${state.showSensitiveOnly ? `Sensitive Only (${sensitiveCount})` : 'All Data'}</span>
       </label>
     `;
   } else if (state.activeTab === 'endpoints') {
     // Endpoints filter
     const callableCount = state.endpointAnalysis?.workflows?.filter(w => w.isCallable).length || 0;
-    container.innerHTML = `
+    filtersHtml += `
       <label class="filter-toggle">
         <input type="checkbox" id="callableFilter" ${state.showCallableOnly ? 'checked' : ''} onchange="toggleCallableFilter()">
         <span class="toggle-slider"></span>
         <span class="toggle-label">Show sensitive only (${callableCount})</span>
       </label>
     `;
-  } else if (state.activeTab === 'keys') {
-    // API Keys tab - no filter display needed
-    container.innerHTML = '';
-  } else if (state.activeTab === 'pages') {
-    // Pages tab - no filter display needed
-    container.innerHTML = '';
   }
+
+  container.innerHTML = filtersHtml;
 }
 
 // Deterministic endpoint security analysis

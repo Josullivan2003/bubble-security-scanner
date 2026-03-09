@@ -9,25 +9,26 @@ Bubble App Security Scanner - a web tool for auditing Bubble.io applications to 
 ## Commands
 
 ```bash
-# Install dependencies
-npm install
-
-# Run the server (port 3000)
-npm start
+npm install       # Install dependencies
+npm start         # Run server on port 3000
+npm run dev       # Same as npm start
 ```
+
+Requires Node.js 20.x (see .nvmrc/.node-version).
 
 ## Required Environment Variables
 
 ```
 ANTHROPIC_API_KEY=your_api_key_here
+BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 ```
 
 ## Architecture
 
-**Simple Node.js + vanilla JS stack:**
-- `server.js` - Express backend with all API endpoints
-- `public/app.js` - Frontend state management and UI logic
-- `public/index.html` - Single page UI
+**Simple Node.js + vanilla JS stack (ES modules):**
+- `server.js` - Express backend with all API endpoints (~2300 lines)
+- `public/app.js` - Frontend state management and UI logic (~3500 lines)
+- `public/index.html` - Single page UI with 4 tabs (Data, Endpoints, API Keys, Pages)
 - `public/styles.css` - Glassmorphism styling
 
 **Data Flow:**
@@ -43,20 +44,40 @@ ANTHROPIC_API_KEY=your_api_key_here
 - `state.tableSensitivity` - Table-level sensitivity (derived from columns)
 - `state.allColumnSensitivity` - Column sensitivity for all tables
 - `state.manualColumnOverrides` - User manual sensitivity overrides
+- `state.activeTab` - Current UI tab ('tables' | 'endpoints' | 'keys' | 'pages')
 
 **External APIs:**
 - AWS Lambda for DBML schema extraction
 - Cloudflare Worker for encrypted Bubble data access (uses x, y, z encryption params)
 - Anthropic Claude API for sensitivity classification
+- Browserless.io for headless Chrome in serverless environments
 
-## AI Classification Endpoints
+## API Endpoints
 
-Three Claude-powered endpoints in `server.js`:
+**AI-Powered (Claude):**
 - `POST /api/analyze-sensitivity` - Table-level analysis (schema-based)
 - `POST /api/analyze-columns` - Column-level analysis with sample data
 - `POST /api/generate-summary` - Prioritized summary of critical exposures
+- `POST /api/analyze-endpoint-risk` - Workflow API endpoint risk assessment
+- `POST /api/analyze-api-exposure` - API key exposure analysis
 
-All use model `claude-sonnet-4-20250514` and return JSON responses.
+**Data Fetching:**
+- `GET /api/schema` - Fetch DBML schema via AWS Lambda
+- `GET /api/meta` - Fetch Bubble app metadata
+- `POST /api/fetch-table` - Fetch table data via encrypted worker
+- `POST /api/workflows` - Parse workflow API definitions
+
+**Page/Editor Scanning (Puppeteer):**
+- `POST /api/scan-api-keys` - Scan client-side JS for exposed keys
+- `POST /api/test-pages` - Test page access with pagination
+- `GET /api/test-pages-stream` - SSE streaming for page tests
+- `POST /api/app-plan` - Get Bubble app plan info
+
+All AI endpoints use model `claude-sonnet-4-20250514` and return JSON responses.
+
+## Deployment
+
+**Vercel:** Configured via `vercel.json` with 60s function timeout and 1024MB memory. All routes rewrite to server.js.
 
 ## Important Notes
 
@@ -64,3 +85,5 @@ All use model `claude-sonnet-4-20250514` and return JSON responses.
 - Frontend processes tables in parallel batches of 4 for performance
 - Column sensitivity is cached in `state.allColumnSensitivity` to avoid re-analysis
 - Manual overrides take priority over AI classifications
+- Puppeteer uses local Chrome for development, Browserless.io for production/Vercel
+- Page testing supports pagination (20 pages per batch) for Vercel's 60s timeout

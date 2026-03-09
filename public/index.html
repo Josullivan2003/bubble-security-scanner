@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css?v=36">
+  <link rel="stylesheet" href="styles.css?v=46">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -159,8 +159,35 @@
         <div class="modal-body" id="modalBody"></div>
       </div>
     </div>
+
+    <!-- Auth Credentials Modal -->
+    <div id="authModal" class="modal hidden">
+      <div class="modal-backdrop" onclick="closeAuthModal()"></div>
+      <div class="modal-content auth-modal-content">
+        <div class="modal-header">
+          <h3>Authenticated Scan</h3>
+          <button class="modal-close" onclick="closeAuthModal()">&times;</button>
+        </div>
+        <div class="modal-body">
+          <p class="auth-modal-description">Enter your session credentials to scan as a logged-in user.</p>
+          <div class="auth-input-group">
+            <label for="authPayloadInput">Request Payload</label>
+            <textarea id="authPayloadInput" placeholder="Paste the full JSON payload from Network tab (contains x, y, z values)"></textarea>
+          </div>
+          <div class="auth-input-group">
+            <label for="authCookieInput">Cookies</label>
+            <textarea id="authCookieInput" placeholder="Paste all cookies from DevTools (Application → Cookies)"></textarea>
+          </div>
+          <div id="authScanError" class="error-box hidden"></div>
+          <div class="auth-modal-actions">
+            <button class="btn-secondary" onclick="closeAuthModal()">Cancel</button>
+            <button id="runAuthScanBtn" class="btn-primary" onclick="runAuthenticatedScan()">Run Scan</button>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <script src="app.js?v=56"></script>
+  <script src="app.js?v=94"></script>
 </body>
 </html>
