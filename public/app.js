@@ -1506,7 +1506,8 @@ async function runAuthenticatedScan() {
     showError('authScanError', 'Please paste the request payload JSON');
     return;
   }
-  if (!rawCookies) {
+  // Cookies are optional in enterprise mode
+  if (!rawCookies && !state.enterpriseMode) {
     showError('authScanError', 'Please paste your session cookies');
     return;
   }
@@ -1526,35 +1527,40 @@ async function runAuthenticatedScan() {
     return;
   }
 
-  // Parse cookies
-  const cookies = parseCookieInput(rawCookies);
-  if (!cookies) {
-    showError('authScanError', 'Could not parse cookies. Please paste the cookie values from DevTools.');
-    return;
-  }
+  // Parse cookies (optional in enterprise mode)
+  let cookies = '';
+  if (rawCookies) {
+    cookies = parseCookieInput(rawCookies);
+    if (!cookies && !state.enterpriseMode) {
+      showError('authScanError', 'Could not parse cookies. Please paste the cookie values from DevTools.');
+      return;
+    }
 
-  // Validate required auth cookies
-  let hasU1, hasU2, hasSig;
+    // Validate required auth cookies (only if cookies were provided)
+    if (cookies) {
+      let hasU1, hasU2, hasSig;
 
-  if (state.enterpriseMode) {
-    // Enterprise mode: Accept broader cookie formats
-    hasU1 = cookies.match(/_u1[a-z0-9]*=/);
-    hasU2 = cookies.match(/_u2[a-z0-9]*=/);
-    hasSig = cookies.match(/_u2[a-z0-9]*\.sig=/);
-  } else {
-    // Normal mode: Strict cookie matching
-    hasU1 = cookies.match(/_u1main=/);
-    hasU2 = cookies.includes('_live_u2main=');
-    hasSig = cookies.includes('_live_u2main.sig=');
-  }
+      if (state.enterpriseMode) {
+        // Enterprise mode: Accept broader cookie formats
+        hasU1 = cookies.match(/_u1[a-z0-9]*=/);
+        hasU2 = cookies.match(/_u2[a-z0-9]*=/);
+        hasSig = cookies.match(/_u2[a-z0-9]*\.sig=/);
+      } else {
+        // Normal mode: Strict cookie matching
+        hasU1 = cookies.match(/_u1main=/);
+        hasU2 = cookies.includes('_live_u2main=');
+        hasSig = cookies.includes('_live_u2main.sig=');
+      }
 
-  if (!hasU1 || !hasU2 || !hasSig) {
-    const missing = [];
-    if (!hasU1) missing.push('{appname}_u1{version}');
-    if (!hasU2) missing.push('{appname}_u2{version}');
-    if (!hasSig) missing.push('{appname}_u2{version}.sig');
-    showError('authScanError', `Missing required cookies: ${missing.join(', ')}`);
-    return;
+      if (!hasU1 || !hasU2 || !hasSig) {
+        const missing = [];
+        if (!hasU1) missing.push('{appname}_u1{version}');
+        if (!hasU2) missing.push('{appname}_u2{version}');
+        if (!hasSig) missing.push('{appname}_u2{version}.sig');
+        showError('authScanError', `Missing required cookies: ${missing.join(', ')}`);
+        return;
+      }
+    }
   }
 
   hideError('authScanError');
@@ -1570,7 +1576,7 @@ async function runAuthenticatedScan() {
     state.yValue = yValue;
   }
 
-  console.log('Running authenticated scan with:', { x: xValue, y: yValue, cookies: cookies.substring(0, 50) + '...' });
+  console.log('Running scan with:', { x: xValue, y: yValue, cookies: cookies ? cookies.substring(0, 50) + '...' : '(none)' });
 
   // Disable button during scan
   const btn = document.getElementById('runAuthScanBtn');
@@ -1579,23 +1585,24 @@ async function runAuthenticatedScan() {
 
   try {
     if (state.enterpriseMode) {
-      // Enterprise mode: Run both logged-out and logged-in scans
-      console.log('Enterprise mode: Running both logged-out and logged-in scans');
+      // Enterprise mode: Run logged-out scan, and logged-in scan if cookies provided
+      const hasCookies = cookies && cookies.length > 0;
+      console.log(`Enterprise mode: Running logged-out scan${hasCookies ? ' and logged-in scan' : ' only (no cookies)'}`);
 
       // First, run logged-out scan (no cookies, using user's x, y)
       btn.textContent = 'Scanning logged-out...';
       await fetchAllTableCounts(); // Uses state.xValue, state.yValue (now set to user's values)
       await analyzeSensitivity();
 
-      // Then run logged-in scan (with cookies)
-      btn.textContent = 'Scanning logged-in...';
-      await runAuthenticatedAnalysis();
+      // Run logged-in scan only if cookies were provided
+      if (hasCookies) {
+        btn.textContent = 'Scanning logged-in...';
+        await runAuthenticatedAnalysis();
+        state.hasAuthData = true;
+      }
 
       // Run API keys/pages scan
       scanApiKeys();
-
-      // Mark that we have auth data
-      state.hasAuthData = true;
 
       // Close the modal
       closeAuthModal();
@@ -1603,7 +1610,7 @@ async function runAuthenticatedScan() {
       // Start with logged-out view in enterprise mode
       switchView('logged-out');
 
-      console.log('Enterprise scan complete (both views ready)');
+      console.log(`Enterprise scan complete${hasCookies ? ' (both views ready)' : ' (logged-out only)'`);
     } else {
       // Normal mode: Just run authenticated scan
       await runAuthenticatedAnalysis();
