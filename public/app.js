@@ -1534,15 +1534,25 @@ async function runAuthenticatedScan() {
   }
 
   // Validate required auth cookies
-  const hasU1 = cookies.match(/_u1main=/);
-  const hasLiveU2 = cookies.includes('_live_u2main=');
-  const hasLiveSig = cookies.includes('_live_u2main.sig=');
+  let hasU1, hasU2, hasSig;
 
-  if (!hasU1 || !hasLiveU2 || !hasLiveSig) {
+  if (state.enterpriseMode) {
+    // Enterprise mode: Accept broader cookie formats
+    hasU1 = cookies.match(/_u1[a-z0-9]*=/);
+    hasU2 = cookies.match(/_u2[a-z0-9]*=/);
+    hasSig = cookies.match(/_u2[a-z0-9]*\.sig=/);
+  } else {
+    // Normal mode: Strict cookie matching
+    hasU1 = cookies.match(/_u1main=/);
+    hasU2 = cookies.includes('_live_u2main=');
+    hasSig = cookies.includes('_live_u2main.sig=');
+  }
+
+  if (!hasU1 || !hasU2 || !hasSig) {
     const missing = [];
-    if (!hasU1) missing.push('{appname}_u1main');
-    if (!hasLiveU2) missing.push('{appname}_live_u2main');
-    if (!hasLiveSig) missing.push('{appname}_live_u2main.sig');
+    if (!hasU1) missing.push('{appname}_u1{version}');
+    if (!hasU2) missing.push('{appname}_u2{version}');
+    if (!hasSig) missing.push('{appname}_u2{version}.sig');
     showError('authScanError', `Missing required cookies: ${missing.join(', ')}`);
     return;
   }
@@ -1892,14 +1902,39 @@ function parseCookieInput(input) {
 
   // Helper to check if cookie is a live auth cookie (not test/debug variants)
   function isLiveAuthCookie(name) {
-    // Match: {appname}_u1main (ends with _u1main, not _u1_testmain or _u1_9325ymain)
-    if (name.match(/_u1main$/) && !name.includes('_u1_')) {
-      return true;
+    // Skip test/debug cookies
+    if (name.includes('_test') || name.includes('debug_mode')) {
+      return false;
     }
-    // Match: {appname}_live_u2main or {appname}_live_u2main.sig
-    if (name.includes('_live_u2main')) {
-      return true;
+
+    if (state.enterpriseMode) {
+      // Enterprise mode: Accept broader cookie formats
+      // Match various Bubble u1 cookie formats:
+      // - {appname}_u1main (standard)
+      // - {appname}_u1{version} like _u1d255
+      if (name.match(/_u1[a-z0-9]*$/) && !name.includes('_u1_')) {
+        return true;
+      }
+
+      // Match various Bubble u2 cookie formats:
+      // - {appname}_live_u2main (standard)
+      // - {appname}_{deployment}_u2{version} like _52m_u2d255
+      // - Also match .sig variants
+      if (name.match(/_u2[a-z0-9]*(\.sig)?$/)) {
+        return true;
+      }
+    } else {
+      // Normal mode: Strict cookie matching
+      // Match: {appname}_u1main (ends with _u1main, not _u1_testmain or _u1_9325ymain)
+      if (name.match(/_u1main$/) && !name.includes('_u1_')) {
+        return true;
+      }
+      // Match: {appname}_live_u2main or {appname}_live_u2main.sig
+      if (name.includes('_live_u2main')) {
+        return true;
+      }
     }
+
     return false;
   }
 
