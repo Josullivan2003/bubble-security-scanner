@@ -1610,7 +1610,7 @@ async function runAuthenticatedScan() {
       // Start with logged-out view in enterprise mode
       switchView('logged-out');
 
-      console.log(`Enterprise scan complete${hasCookies ? ' (both views ready)' : ' (logged-out only)'`);
+      console.log(`Enterprise scan complete${hasCookies ? ' (both views ready)' : ' (logged-out only)'}`);
     } else {
       // Normal mode: Just run authenticated scan
       await runAuthenticatedAnalysis();
