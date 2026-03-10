@@ -2598,6 +2598,140 @@ function maskKey(key) {
   return key.substring(0, 6) + '...' + key.substring(key.length - 4);
 }
 
+// Debug endpoint to compare data with and without cookies
+app.post('/api/debug-compare', async (req, res) => {
+  const { x, y, appName, appUrl, tableType, cookies } = req.body;
+
+  if (!x || !y || !appName || !appUrl || !tableType) {
+    return res.status(400).json({ error: 'x, y, appName, appUrl, and tableType are required' });
+  }
+
+  console.log('\n========== DEBUG COMPARE ==========');
+  console.log('Comparing data with and without cookies for:', tableType);
+  console.log('Cookies provided:', cookies ? cookies.substring(0, 100) + '...' : 'NONE');
+
+  try {
+    // Use the same payload format as fetchTableSample
+    const payload = {
+      app_version: 'live',
+      appname: appName,
+      constraints: [],
+      from: 0,
+      n: 10,
+      search_path: '{"constructor_name":"DataSource","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0.%p.%ds"},{"type":"node","value":{"constructor_name":"Element","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0"}]}},{"type":"raw","value":"Search"}]}',
+      situation: 'initial search',
+      sorts_list: [],
+      type: tableType,
+    };
+
+    // Step 1: Get encryption params (same for both requests)
+    const encryptUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/encrypt';
+    const encryptResponse = await fetch(encryptUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x, y, payload, appname: appName }),
+    });
+    const encryptData = await encryptResponse.json();
+
+    if (!encryptData.z) {
+      console.log('Encryption failed - no z value');
+      return res.json({ error: 'Encryption failed', details: encryptData });
+    }
+
+    const appUrlObj = new URL(appUrl);
+    const searchUrl = `${appUrlObj.origin}/version-live/elasticsearch/search`;
+    const workerUrl = 'https://auth-worker.james-a7a.workers.dev/';
+
+    const workerPayloadBase = {
+      x: encryptData.x,
+      y: encryptData.y,
+      z: encryptData.z,
+      appname: appName,
+      url: searchUrl,
+    };
+
+    // Fetch WITHOUT cookies
+    console.log('\n[1] Fetching WITHOUT cookies...');
+    console.log('    Worker URL:', workerUrl);
+    console.log('    Search URL:', searchUrl);
+    const noCookieResponse = await fetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(workerPayloadBase),
+    });
+    const noCookieData = await noCookieResponse.json();
+    console.log('    Response status:', noCookieData.status);
+    console.log('    Authenticated:', noCookieData.authenticated);
+
+    // Fetch WITH cookies
+    console.log('\n[2] Fetching WITH cookies...');
+    console.log('    Cookies being sent:', cookies ? cookies.substring(0, 150) : 'EMPTY!');
+    const withCookieResponse = await fetch(workerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...workerPayloadBase,
+        cookies: cookies,
+      }),
+    });
+    const withCookieData = await withCookieResponse.json();
+    console.log('    Response status:', withCookieData.status);
+    console.log('    Authenticated:', withCookieData.authenticated);
+
+    // Extract hits for comparison
+    const noCookieHits = noCookieData.body?.hits?.hits || noCookieData.hits?.hits || [];
+    const withCookieHits = withCookieData.body?.hits?.hits || withCookieData.hits?.hits || [];
+
+    console.log('\n[3] RESULTS SUMMARY:');
+    console.log('    WITHOUT cookies: authenticated =', noCookieData.authenticated, ', hits =', noCookieHits.length);
+    console.log('    WITH cookies: authenticated =', withCookieData.authenticated, ', hits =', withCookieHits.length);
+
+    // Compare IDs
+    const noCookieIds = noCookieHits.map(h => h._id);
+    const withCookieIds = withCookieHits.map(h => h._id);
+
+    // Compare field counts in first record
+    const noCookieFields = noCookieHits[0] ? Object.keys(noCookieHits[0]._source || {}) : [];
+    const withCookieFields = withCookieHits[0] ? Object.keys(withCookieHits[0]._source || {}) : [];
+
+    console.log('    WITHOUT cookies fields:', noCookieFields.length, noCookieFields.slice(0, 10));
+    console.log('    WITH cookies fields:', withCookieFields.length, withCookieFields.slice(0, 10));
+    console.log('========== END DEBUG ==========\n');
+
+    res.json({
+      comparison: {
+        noCookies: {
+          authenticated: noCookieData.authenticated,
+          totalHits: noCookieData.body?.hits?.total || 'unknown',
+          recordCount: noCookieHits.length,
+          recordIds: noCookieIds,
+          fieldCount: noCookieFields.length,
+          fields: noCookieFields,
+          firstRecord: noCookieHits[0]?._source || null
+        },
+        withCookies: {
+          authenticated: withCookieData.authenticated,
+          totalHits: withCookieData.body?.hits?.total || 'unknown',
+          recordCount: withCookieHits.length,
+          recordIds: withCookieIds,
+          fieldCount: withCookieFields.length,
+          fields: withCookieFields,
+          firstRecord: withCookieHits[0]?._source || null
+        }
+      },
+      differences: {
+        sameRecordIds: JSON.stringify(noCookieIds) === JSON.stringify(withCookieIds),
+        sameFieldCount: noCookieFields.length === withCookieFields.length,
+        onlyInWithCookies: withCookieFields.filter(f => !noCookieFields.includes(f)),
+        onlyInNoCookies: noCookieFields.filter(f => !withCookieFields.includes(f))
+      }
+    });
+  } catch (error) {
+    console.error('Debug compare error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Serve the main page
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));

@@ -24,6 +24,7 @@ let state = {
   authYValue: '',                     // Y value for authenticated scan
   authCookies: '',                    // Cookies for authenticated scan
   currentView: 'logged-out',          // 'logged-out' | 'logged-in'
+  hasAuthCookies: false,              // Whether cookies are available for auth scan
   hasAuthData: false,                 // Whether authenticated scan has been run
   // Logged-out data (default scan) - stored for comparison
   loggedOutData: {
@@ -397,15 +398,16 @@ async function fetchTableSample(tableId) {
   };
 
   try {
-    // Logged-out scan: no cookies, no userMode
+    // In enterprise mode, use userMode to query app directly with user's x,y values
     const requestBody = {
       x: state.xValue,
       y: state.yValue,
       payload: payload,
       appName: state.appName,
       appUrl: state.bubbleUrl,
+      ...(state.enterpriseMode && { userMode: true }),
     };
-    console.log('fetchTableSample (logged-out) sending:', { x: state.xValue, y: state.yValue });
+    console.log('fetchTableSample sending:', { x: state.xValue, y: state.yValue, enterpriseMode: state.enterpriseMode });
     const response = await fetch('/api/fetch-table', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -504,19 +506,38 @@ function getTableType(tableId) {
 async function fetchTableCount(tableId) {
   const tableType = getTableType(tableId);
 
-  // Use aggregate API for accurate counts
-  const response = await fetch('/api/aggregate-count', {
+  // In enterprise mode, use the auth endpoint (works without cookies too)
+  // Otherwise use the default proxy-based endpoint
+  const endpoint = state.enterpriseMode ? '/api/aggregate-count-auth' : '/api/aggregate-count';
+
+  const requestBody = {
+    x: state.xValue,
+    y: state.yValue,
+    appName: state.appName,
+    tableType: tableType,
+  };
+
+  // Add appUrl for enterprise mode (required by auth endpoint)
+  if (state.enterpriseMode) {
+    requestBody.appUrl = state.bubbleUrl;
+  }
+
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      x: state.xValue,
-      y: state.yValue,
-      appName: state.appName,
-      tableType: tableType,
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   const data = await response.json();
+
+  // Log what the logged-out scan receives
+  if (tableId === 'user') {
+    console.log('fetchTableCount (logged-out scan) for user:', {
+      count: data.count,
+      authenticated: data.authenticated,
+      hasCookiesInRequest: false,
+    });
+  }
 
   if (data.error || data.count === 0) {
     return { count: 0, metadataOnly: false };
@@ -552,6 +573,7 @@ async function checkMetadataOnly(tableId) {
         payload: payload,
         appName: state.appName,
         appUrl: state.bubbleUrl,
+        ...(state.enterpriseMode && { userMode: true }),
       }),
     });
 
@@ -585,6 +607,15 @@ function renderTableList() {
   const sensitivityData = useLoggedIn ? state.loggedInData.tableSensitivity : state.tableSensitivity;
   const recordCounts = useLoggedIn ? state.loggedInData.tableRecordCounts : null;
 
+  console.log('renderTableList:', {
+    view: state.currentView,
+    useLoggedIn,
+    hasAuthData: state.hasAuthData,
+    loggedInCountsKeys: Object.keys(state.loggedInData?.tableRecordCounts || {}),
+    sampleLoggedInCount: state.loggedInData?.tableRecordCounts?.['user'],
+    recordCountsUsed: recordCounts ? 'loggedIn' : 'default',
+  });
+
   // Sort tables alphabetically by display name
   let sortedTables = [...state.tables].sort((a, b) =>
     a.display.toLowerCase().localeCompare(b.display.toLowerCase())
@@ -604,6 +635,18 @@ function renderTableList() {
     const displayCount = recordCounts && recordCounts[table.id] !== undefined
       ? recordCounts[table.id]
       : table.recordCount;
+
+    // Debug: log for user table
+    if (table.id === 'user' || table.display === 'user') {
+      console.log('renderTableList user:', {
+        tableId: table.id,
+        tableRecordCount: table.recordCount,
+        loggedInCount: state.loggedInData?.tableRecordCounts?.[table.id],
+        recordCountsLookup: recordCounts?.[table.id],
+        displayCount,
+        useLoggedIn,
+      });
+    }
     const hasRecords = displayCount !== undefined && displayCount !== 0 && displayCount !== '0';
     // For logged-in view, if we have records, we know it's real data (metadataOnly was already filtered)
     // For logged-out view, use the metadataOnly flag
@@ -700,22 +743,43 @@ async function selectTable(tableId, displayName) {
     // Call fetch-table endpoint (encrypt + worker API)
     // Use authenticated credentials if viewing logged-in data
     const useAuth = state.currentView === 'logged-in' && state.hasAuthData;
+    // In enterprise mode, always use userMode since we're using user's x,y values
+    const needsUserMode = useAuth || state.enterpriseMode;
+
+    const requestBody = {
+      x: useAuth ? state.authXValue : state.xValue,
+      y: useAuth ? state.authYValue : state.yValue,
+      payload: payload,
+      appName: state.appName,
+      appUrl: state.bubbleUrl,
+      ...(needsUserMode && { userMode: true }),
+      ...(useAuth && { cookies: state.authCookies }),
+    };
+
+    console.log('selectTable fetch:', {
+      view: state.currentView,
+      useAuth,
+      hasAuthData: state.hasAuthData,
+      enterpriseMode: state.enterpriseMode,
+      cookiesInRequest: requestBody.cookies ? requestBody.cookies.substring(0, 80) + '...' : 'NO COOKIES',
+    });
+
     const response = await fetch('/api/fetch-table', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        x: useAuth ? state.authXValue : state.xValue,
-        y: useAuth ? state.authYValue : state.yValue,
-        payload: payload,
-        appName: state.appName,
-        appUrl: state.bubbleUrl,
-        ...(useAuth && { cookies: state.authCookies, userMode: true }),
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     const data = await response.json();
+
+    console.log('selectTable response:', {
+      status: data.status,
+      authenticated: data.authenticated,
+      recordCount: data.body?.hits?.hits?.length || 0,
+      totalInResponse: data.body?.hits?.total,  // This is the key - actual total visible to this user
+    });
 
     if (data.error) {
       throw new Error(data.error);
@@ -1585,20 +1649,23 @@ async function runAuthenticatedScan() {
 
   try {
     if (state.enterpriseMode) {
-      // Enterprise mode: Run logged-out scan, and logged-in scan if cookies provided
+      // Enterprise mode: Run both logged-out and logged-in scans
       const hasCookies = cookies && cookies.length > 0;
-      console.log(`Enterprise mode: Running logged-out scan${hasCookies ? ' and logged-in scan' : ' only (no cookies)'}`);
+      console.log(`Enterprise mode: Running both scans (cookies: ${hasCookies})`);
 
-      // First, run logged-out scan (no cookies, using user's x, y)
+      // Step 1: Run logged-out scan (no cookies, using user's x, y)
       btn.textContent = 'Scanning logged-out...';
-      await fetchAllTableCounts(); // Uses state.xValue, state.yValue (now set to user's values)
+      await fetchAllTableCounts();
       await analyzeSensitivity();
+      console.log('Logged-out scan complete');
 
-      // Run logged-in scan only if cookies were provided
+      // Step 2: Run logged-in scan if cookies provided
       if (hasCookies) {
         btn.textContent = 'Scanning logged-in...';
         await runAuthenticatedAnalysis();
+        state.hasAuthCookies = true;
         state.hasAuthData = true;
+        console.log('Logged-in scan complete');
       }
 
       // Run API keys/pages scan
@@ -1610,7 +1677,12 @@ async function runAuthenticatedScan() {
       // Start with logged-out view in enterprise mode
       switchView('logged-out');
 
-      console.log(`Enterprise scan complete${hasCookies ? ' (both views ready)' : ' (logged-out only)'}`);
+      console.log('Enterprise scan complete:', {
+        hasAuthCookies: state.hasAuthCookies,
+        hasAuthData: state.hasAuthData,
+        loggedOutTables: Object.keys(state.tableSensitivity || {}).length,
+        loggedInTables: Object.keys(state.loggedInData?.tableSensitivity || {}).length,
+      });
     } else {
       // Normal mode: Just run authenticated scan
       await runAuthenticatedAnalysis();
@@ -1655,6 +1727,7 @@ async function runAuthenticatedAnalysis() {
   }
 
   console.log(`Running authenticated analysis for ${allTables.length} tables (including ${state.tables.filter(t => t.metadataOnly).length} that were metadata-only for logged-out)`);
+  console.log('Auth scan using cookies:', state.authCookies ? state.authCookies.substring(0, 100) + '...' : 'NO COOKIES!');
 
   // Reset logged-in data
   state.loggedInData = {
@@ -1714,7 +1787,10 @@ async function fetchAuthenticatedTableCount(table) {
 
     // Store the count (even if 0)
     state.loggedInData.tableRecordCounts[table.id] = data.count || 0;
-    console.log(`Auth table ${table.id}: ${data.count || 0} records`);
+    // Log with authentication status to verify cookies are working
+    if (table.id === 'user' || data.count > 0) {
+      console.log(`Auth table ${table.id}: ${data.count || 0} records (authenticated: ${data.authenticated}, cookies sent: ${state.authCookies ? 'yes' : 'no'})`);
+    }
   } catch (error) {
     console.error(`Failed to fetch auth count for ${table.id}:`, error);
     state.loggedInData.tableRecordCounts[table.id] = 0;
@@ -1854,17 +1930,19 @@ function switchView(view) {
 }
 
 // Handle the view toggle checkbox change
-function handleViewToggle(checked) {
+async function handleViewToggle(checked) {
+  console.log('handleViewToggle called:', { checked, hasAuthData: state.hasAuthData });
+
   if (checked) {
     // Switching to logged-in
-    if (!state.hasAuthData) {
-      // No auth data yet - show the modal
+    if (state.hasAuthData) {
+      // Data already loaded - just switch view
+      switchView('logged-in');
+    } else {
+      // No auth data - show modal to get credentials
       openAuthModal();
-      // Don't switch view yet - wait for successful scan
       return;
     }
-    // Has auth data - switch view
-    switchView('logged-in');
   } else {
     // Switching to logged-out
     switchView('logged-out');
@@ -2278,9 +2356,9 @@ function renderTabFilter() {
   let filtersHtml = '';
 
   // Add view toggle for logged-in/logged-out switching
-  // In enterprise mode: only show after scans complete (hasAuthData)
+  // In enterprise mode: show when cookies are available (allows running auth scan on toggle)
   // In normal mode: always show (allows triggering auth modal)
-  const showViewToggle = state.enterpriseMode ? state.hasAuthData : true;
+  const showViewToggle = state.enterpriseMode ? state.hasAuthCookies : true;
   if (showViewToggle) {
     const isLoggedIn = state.currentView === 'logged-in';
     filtersHtml += `
@@ -4106,4 +4184,55 @@ function exportExposedPagesCSV() {
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
+}
+
+// Debug function to compare data with and without cookies
+// Call from browser console: debugCompare('user')
+window.debugCompare = async function(tableType = 'user') {
+  console.log('=== DEBUG COMPARE ===');
+  console.log('Using credentials:');
+  console.log('  x:', state.xValue);
+  console.log('  y:', state.yValue);
+  console.log('  appName:', state.appName);
+  console.log('  appUrl:', state.bubbleUrl);
+  console.log('  cookies:', state.authCookies ? state.authCookies.substring(0, 100) + '...' : 'none');
+
+  try {
+    const response = await fetch('/api/debug-compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.xValue,
+        y: state.yValue,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+        tableType: tableType,
+        cookies: state.authCookies
+      })
+    });
+    const data = await response.json();
+    console.log('\n=== COMPARISON RESULTS ===');
+    console.log('WITHOUT COOKIES:');
+    console.log('  authenticated:', data.comparison?.noCookies?.authenticated);
+    console.log('  totalHits:', data.comparison?.noCookies?.totalHits);
+    console.log('  recordCount:', data.comparison?.noCookies?.recordCount);
+    console.log('  fieldCount:', data.comparison?.noCookies?.fieldCount);
+    console.log('  fields:', data.comparison?.noCookies?.fields);
+    console.log('\nWITH COOKIES:');
+    console.log('  authenticated:', data.comparison?.withCookies?.authenticated);
+    console.log('  totalHits:', data.comparison?.withCookies?.totalHits);
+    console.log('  recordCount:', data.comparison?.withCookies?.recordCount);
+    console.log('  fieldCount:', data.comparison?.withCookies?.fieldCount);
+    console.log('  fields:', data.comparison?.withCookies?.fields);
+    console.log('\nDIFFERENCES:');
+    console.log('  sameRecordIds:', data.differences?.sameRecordIds);
+    console.log('  sameFieldCount:', data.differences?.sameFieldCount);
+    console.log('  fieldsOnlyWithCookies:', data.differences?.onlyInWithCookies);
+    console.log('  fieldsOnlyWithoutCookies:', data.differences?.onlyInNoCookies);
+    console.log('\nFirst record (no cookies):', data.comparison?.noCookies?.firstRecord);
+    console.log('\nFirst record (with cookies):', data.comparison?.withCookies?.firstRecord);
+    return data;
+  } catch (error) {
+    console.error('Debug compare failed:', error);
+  }
 }
