@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Bubble App Security Scanner</title>
-  <link rel="stylesheet" href="styles.css?v=46">
+  <link rel="stylesheet" href="styles.css?v=58">
 </head>
 <body>
   <!-- Decorative circles -->
@@ -123,9 +123,13 @@
       <div class="step-header">
         <span class="step-number">3</span>
         <div>
-          <h2>Exposed Data</h2>
+          <h2>Exposed Data <span id="filterIconContainer" class="filter-icon-container hidden"><button id="filterBtn" class="filter-header-btn" onclick="showFilterPopup()" title="Filter data">&#128269;</button></span></h2>
           <p id="resultsInfo" class="results-subtitle"><span id="tableName"></span> - <span id="recordCount">0</span> records found</p>
         </div>
+      </div>
+      <div id="filterIndicator" class="filter-indicator hidden">
+        <span class="filter-indicator-text"></span>
+        <button onclick="clearAllFilters()" class="filter-indicator-clear">Clear Filters</button>
       </div>
       <div id="resultsContainer">
         <div id="loadingResults" class="loading hidden">
@@ -188,6 +192,17 @@
     </div>
   </div>
 
-  <script src="app.js?v=112"></script>
+  <!-- User Profile Sidebar -->
+  <div id="userSidebar" class="user-sidebar">
+    <div class="sidebar-header">
+      <h3>User Profile</h3>
+      <button class="sidebar-close" onclick="closeUserSidebar()">&times;</button>
+    </div>
+    <div id="sidebarContent" class="sidebar-content">
+      <!-- User profile content rendered here -->
+    </div>
+  </div>
+
+  <script src="app.js?v=126"></script>
 </body>
 </html>

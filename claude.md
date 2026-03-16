@@ -11,13 +11,13 @@ Bubble App Security Scanner - a web tool for auditing Bubble.io applications to 
 ```bash
 npm install       # Install dependencies
 npm start         # Run server on port 3000
-npm run dev       # Same as npm start
 ```
 
 Requires Node.js 20.x (see .nvmrc/.node-version).
 
 ## Required Environment Variables
 
+Create a `.env` file with:
 ```
 ANTHROPIC_API_KEY=your_api_key_here
 BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
@@ -26,10 +26,14 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 ## Architecture
 
 **Simple Node.js + vanilla JS stack (ES modules):**
-- `server.js` - Express backend with all API endpoints (~2300 lines)
-- `public/app.js` - Frontend state management and UI logic (~3500 lines)
+- `server.js` - Express backend with all API endpoints
+- `public/app.js` - Frontend state management and UI logic
 - `public/index.html` - Single page UI with 4 tabs (Data, Endpoints, API Keys, Pages)
 - `public/styles.css` - Glassmorphism styling
+
+**Scan Modes:**
+- **Normal mode** - Fetches data via Cloudflare Worker proxy with encryption params
+- **Enterprise mode** (`?enterprise=yes`) - Requires user credentials (x, y values) before scanning; runs both logged-out and logged-in scans; cookies are optional
 
 **Data Flow:**
 1. User enters Bubble.io app URL
@@ -45,11 +49,13 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 - `state.allColumnSensitivity` - Column sensitivity for all tables
 - `state.manualColumnOverrides` - User manual sensitivity overrides
 - `state.activeTab` - Current UI tab ('tables' | 'endpoints' | 'keys' | 'pages')
+- `state.enterpriseMode` - If true, requires credentials before scanning
+- `state.currentView` - 'logged-out' | 'logged-in' for comparing data exposure
 
 **External APIs:**
 - AWS Lambda for DBML schema extraction
 - Cloudflare Worker for encrypted Bubble data access (uses x, y, z encryption params)
-- Anthropic Claude API for sensitivity classification
+- Anthropic Claude API for sensitivity classification (model: `claude-sonnet-4-20250514`)
 - Browserless.io for headless Chrome in serverless environments
 
 ## API Endpoints
@@ -73,7 +79,7 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 - `GET /api/test-pages-stream` - SSE streaming for page tests
 - `POST /api/app-plan` - Get Bubble app plan info
 
-All AI endpoints use model `claude-sonnet-4-20250514` and return JSON responses.
+All AI endpoints return JSON responses.
 
 ## Deployment
 

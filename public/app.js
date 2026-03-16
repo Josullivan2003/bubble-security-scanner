@@ -23,6 +23,8 @@ let state = {
   authXValue: '',                     // X value for authenticated scan
   authYValue: '',                     // Y value for authenticated scan
   authCookies: '',                    // Cookies for authenticated scan
+  authUserId: null,                   // User ID extracted from cookies
+  authUserProfile: null,              // User profile fetched via mget
   currentView: 'logged-out',          // 'logged-out' | 'logged-in'
   hasAuthCookies: false,              // Whether cookies are available for auth scan
   hasAuthData: false,                 // Whether authenticated scan has been run
@@ -714,6 +716,10 @@ async function selectTable(tableId, displayName) {
   state.selectedTable = tableId;
   resetColumnSettings();
 
+  // Clear any active column filters when switching tables
+  state.columnFilters = [];
+  state.unfilteredResults = null;
+
   // Update UI selection
   document.querySelectorAll('.table-item').forEach((item) => {
     item.classList.toggle('selected', item.dataset.tableId === tableId);
@@ -866,6 +872,9 @@ function parseResults(data) {
 function renderResultsTable() {
   const thead = document.getElementById('resultsHead');
   const tbody = document.getElementById('resultsBody');
+
+  // Update filter indicator
+  updateFilterIndicator();
 
   if (state.results.length === 0) {
     thead.innerHTML = '';
@@ -1406,6 +1415,14 @@ function toggleSensitivityMenu(event, fieldName) {
   }, 0);
 }
 
+// Extract value after __LOOKUP__ if present
+function extractLookupValue(str) {
+  if (typeof str === 'string' && str.includes('__LOOKUP__')) {
+    return str.split('__LOOKUP__')[1];
+  }
+  return str;
+}
+
 // Format cell value for display
 function formatValue(value) {
   if (value === null || value === undefined) {
@@ -1417,11 +1434,20 @@ function formatValue(value) {
     return formatDate(value);
   }
 
+  // Handle arrays - extract __LOOKUP__ from each element
+  if (Array.isArray(value)) {
+    const processed = value.map(item => extractLookupValue(item));
+    return JSON.stringify(processed);
+  }
+
   if (typeof value === 'object') {
     return JSON.stringify(value);
   }
 
-  return String(value);
+  let strValue = String(value);
+
+  // Extract value after __LOOKUP__ if present
+  return extractLookupValue(strValue);
 }
 
 // Check if a value looks like a date
@@ -1634,6 +1660,12 @@ async function runAuthenticatedScan() {
   state.authYValue = yValue;
   state.authCookies = cookies;
 
+  // Extract user ID from cookies
+  if (cookies) {
+    state.authUserId = extractUserIdFromCookies(cookies);
+    console.log('Extracted user ID:', state.authUserId);
+  }
+
   // In enterprise mode, also use these as the main x/y values for logged-out scan
   if (state.enterpriseMode) {
     state.xValue = xValue;
@@ -1665,6 +1697,10 @@ async function runAuthenticatedScan() {
         await runAuthenticatedAnalysis();
         state.hasAuthCookies = true;
         state.hasAuthData = true;
+        // Fetch user profile if we have a user ID
+        if (state.authUserId) {
+          fetchUserProfile(state.authUserId);
+        }
         console.log('Logged-in scan complete');
       }
 
@@ -1689,6 +1725,11 @@ async function runAuthenticatedScan() {
 
       // Mark that we have auth data
       state.hasAuthData = true;
+
+      // Fetch user profile if we have a user ID
+      if (state.authUserId) {
+        fetchUserProfile(state.authUserId);
+      }
 
       // Close the modal
       closeAuthModal();
@@ -1912,6 +1953,12 @@ function switchView(view) {
     toggle.checked = view === 'logged-in';
   }
 
+  // Show/hide filter icon based on view
+  const filterIconContainer = document.getElementById('filterIconContainer');
+  if (filterIconContainer) {
+    filterIconContainer.classList.toggle('hidden', view !== 'logged-in');
+  }
+
   // Update the toggle label
   renderTabFilter();
 
@@ -1929,6 +1976,406 @@ function switchView(view) {
   }
 }
 
+// Fetch user profile via mget endpoint
+async function fetchUserProfile(userId) {
+  if (!userId || !state.appName || !state.bubbleUrl) {
+    console.log('fetchUserProfile: Missing userId, appName, or bubbleUrl');
+    return null;
+  }
+
+  try {
+    console.log(`Fetching user profile for: ${userId}`);
+    const response = await fetch('/api/mget', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: state.authXValue || state.xValue,
+        y: state.authYValue || state.yValue,
+        appName: state.appName,
+        appUrl: state.bubbleUrl,
+        ids: [userId],
+      }),
+    });
+
+    const data = await response.json();
+    console.log('User profile response:', data);
+
+    if (data.error) {
+      console.error('mget error:', data.error);
+      return null;
+    }
+
+    state.authUserProfile = data;
+    // Re-render to update the UI with profile data
+    renderTabFilter();
+    return data;
+  } catch (error) {
+    console.error('Failed to fetch user profile:', error);
+    return null;
+  }
+}
+
+// Toggle user profile sidebar
+function toggleUserProfilePopover(event) {
+  event.stopPropagation();
+  openUserSidebar();
+}
+
+// Open the user profile sidebar
+function openUserSidebar() {
+  const sidebar = document.getElementById('userSidebar');
+  if (sidebar) {
+    sidebar.classList.add('open');
+    document.body.classList.add('sidebar-open');
+    renderUserSidebar();
+  }
+}
+
+// Close the user profile sidebar
+function closeUserSidebar() {
+  const sidebar = document.getElementById('userSidebar');
+  if (sidebar) {
+    sidebar.classList.remove('open');
+    document.body.classList.remove('sidebar-open');
+  }
+}
+
+// Render user profile content in sidebar
+function renderUserSidebar() {
+  const container = document.getElementById('sidebarContent');
+  if (!container) return;
+
+  let html = '';
+
+  // User ID section
+  html += `
+    <div class="sidebar-user-id">
+      <span class="label">User ID</span>
+      ${state.authUserId || 'Unknown'}
+    </div>
+  `;
+
+  if (state.authUserProfile) {
+    const docs = state.authUserProfile.body?.docs || state.authUserProfile.docs || [];
+    if (docs.length > 0 && docs[0]._source) {
+      const userData = docs[0]._source;
+
+      // Key fields section
+      const keyFields = ['email', 'name', 'first_name', 'last_name'];
+      const keyFieldsHtml = [];
+
+      for (const [key, value] of Object.entries(userData)) {
+        if (key.startsWith('_') || key === 'type') continue;
+        const isKeyField = keyFields.some(f => key.toLowerCase().includes(f.toLowerCase()));
+        if (isKeyField && value) {
+          keyFieldsHtml.push(`
+            <div class="sidebar-field">
+              <span class="field-name">${formatFieldName(key)}</span>
+              <span class="field-value">${escapeHtml(formatValue(value))}</span>
+            </div>
+          `);
+        }
+      }
+
+      if (keyFieldsHtml.length > 0) {
+        html += `
+          <div class="sidebar-section">
+            <div class="sidebar-section-title">Identity</div>
+            ${keyFieldsHtml.join('')}
+          </div>
+        `;
+      }
+
+      // Dates section
+      const dateFields = [];
+      for (const [key, value] of Object.entries(userData)) {
+        if (key.toLowerCase().includes('date') && typeof value === 'number' && value > 1000000000000) {
+          dateFields.push(`
+            <div class="sidebar-field">
+              <span class="field-name">${formatFieldName(key)}</span>
+              <span class="field-value">${new Date(value).toLocaleString()}</span>
+            </div>
+          `);
+        }
+      }
+
+      if (dateFields.length > 0) {
+        html += `
+          <div class="sidebar-section">
+            <div class="sidebar-section-title">Timestamps</div>
+            ${dateFields.join('')}
+          </div>
+        `;
+      }
+
+      // All other fields
+      const otherFields = [];
+      const shownKeys = new Set();
+      keyFields.forEach(f => {
+        Object.keys(userData).forEach(k => {
+          if (k.toLowerCase().includes(f.toLowerCase())) shownKeys.add(k);
+        });
+      });
+      Object.keys(userData).forEach(k => {
+        if (k.toLowerCase().includes('date')) shownKeys.add(k);
+      });
+
+      for (const [key, value] of Object.entries(userData)) {
+        if (key.startsWith('_') || key === 'type' || shownKeys.has(key)) continue;
+        if (value !== null && value !== undefined && value !== '') {
+          let displayValue = formatValue(value);
+          const isMonospace = typeof value === 'object' || displayValue.length > 30;
+          otherFields.push(`
+            <div class="sidebar-field">
+              <span class="field-name">${formatFieldName(key)}</span>
+              <span class="field-value ${isMonospace ? 'monospace' : ''}">${escapeHtml(displayValue)}</span>
+            </div>
+          `);
+        }
+      }
+
+      if (otherFields.length > 0) {
+        html += `
+          <div class="sidebar-section">
+            <div class="sidebar-section-title">Other Fields</div>
+            ${otherFields.join('')}
+          </div>
+        `;
+      }
+
+    } else {
+      html += `<div class="sidebar-empty">No profile data available</div>`;
+    }
+  } else {
+    html += `
+      <div class="sidebar-loading">
+        <div class="spinner-small"></div>
+        <span>Loading profile...</span>
+      </div>
+    `;
+    // Trigger fetch if not already fetched
+    if (state.authUserId) {
+      fetchUserProfile(state.authUserId).then(() => renderUserSidebar());
+    }
+  }
+
+  container.innerHTML = html;
+}
+
+// Column filter state - supports multiple filters (AND logic)
+state.columnFilters = []; // Array of { column: string, value: string, operator: 'equals' | 'not_equals' }
+state.unfilteredResults = null;
+
+// Show filter popup (centered modal)
+function showFilterPopup() {
+  // Remove existing popup if any
+  closeFilterPopup();
+
+  // Get available columns from current table
+  const columns = state.results.length > 0 ? Object.keys(state.results[0]) : [];
+  const activeFilters = state.columnFilters || [];
+
+  const popup = document.createElement('div');
+  popup.className = 'filter-popup';
+  popup.innerHTML = `
+    <div class="filter-popup-header">
+      <span>Filter Data</span>
+      <button class="filter-popup-close" onclick="closeFilterPopup()">&times;</button>
+    </div>
+    <div class="filter-popup-body">
+      ${activeFilters.length > 0 ? `
+        <div class="active-filters">
+          ${activeFilters.map((f, i) => `
+            <div class="active-filter-chip">
+              <span>${escapeHtml(formatFieldName(f.column))} ${f.operator === 'equals' ? '=' : '≠'} "${escapeHtml(f.value)}"</span>
+              <button onclick="removeFilter(${i})">&times;</button>
+            </div>
+          `).join('')}
+        </div>
+        <div class="filter-divider"></div>
+      ` : ''}
+      <div class="filter-group">
+        <label>Column</label>
+        <select id="filterColumnSelect">
+          ${columns.map(col => `<option value="${escapeHtml(col)}">${escapeHtml(formatFieldName(col))}</option>`).join('')}
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Condition</label>
+        <select id="filterOperatorSelect">
+          <option value="equals">Equals</option>
+          <option value="not_equals">Does not equal</option>
+        </select>
+      </div>
+      <div class="filter-group">
+        <label>Value</label>
+        <input type="text" id="filterValueInput" placeholder="Enter value...">
+      </div>
+    </div>
+    <div class="filter-popup-footer">
+      <button class="btn-secondary" onclick="clearAllFilters()">Clear All</button>
+      <button class="btn-primary" onclick="addFilterFromPopup()">Add Filter</button>
+    </div>
+  `;
+
+  document.body.appendChild(popup);
+
+  // Focus value input and handle enter key
+  const input = document.getElementById('filterValueInput');
+  setTimeout(() => input.focus(), 0);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      addFilterFromPopup();
+    } else if (e.key === 'Escape') {
+      closeFilterPopup();
+    }
+  });
+
+  // Close on click outside (with delay to prevent immediate close)
+  setTimeout(() => {
+    document.addEventListener('click', handleFilterPopupClickOutside);
+  }, 0);
+}
+
+function handleFilterPopupClickOutside(e) {
+  const popup = document.querySelector('.filter-popup');
+  const filterBtn = document.getElementById('filterBtn');
+  if (popup && !popup.contains(e.target) && e.target !== filterBtn) {
+    closeFilterPopup();
+  }
+}
+
+function closeFilterPopup() {
+  const popup = document.querySelector('.filter-popup');
+  if (popup) popup.remove();
+  document.removeEventListener('click', handleFilterPopupClickOutside);
+}
+
+// Add filter from popup inputs
+function addFilterFromPopup() {
+  const columnSelect = document.getElementById('filterColumnSelect');
+  const operatorSelect = document.getElementById('filterOperatorSelect');
+  const valueInput = document.getElementById('filterValueInput');
+
+  if (!columnSelect || !operatorSelect || !valueInput) return;
+
+  const column = columnSelect.value;
+  const operator = operatorSelect.value;
+  const value = valueInput.value.trim();
+
+  if (!value) return;
+
+  // Store original results if not already stored
+  if (!state.unfilteredResults) {
+    state.unfilteredResults = [...state.results];
+  }
+
+  // Add new filter
+  state.columnFilters.push({ column, value, operator });
+
+  // Apply all filters
+  applyAllFilters();
+
+  // Re-render popup to show the new filter chip
+  showFilterPopup();
+}
+
+// Remove a specific filter by index
+function removeFilter(index) {
+  state.columnFilters.splice(index, 1);
+
+  if (state.columnFilters.length === 0) {
+    // No more filters, restore original results
+    if (state.unfilteredResults) {
+      state.results = [...state.unfilteredResults];
+      state.unfilteredResults = null;
+    }
+  } else {
+    // Reapply remaining filters
+    applyAllFilters();
+  }
+
+  // Re-render popup and table
+  showFilterPopup();
+  updateFilterIconState();
+}
+
+// Clear all filters
+function clearAllFilters() {
+  if (state.unfilteredResults) {
+    state.results = [...state.unfilteredResults];
+    state.unfilteredResults = null;
+  }
+  state.columnFilters = [];
+  closeFilterPopup();
+  renderResultsTable();
+  updateFilterIconState();
+}
+
+// Apply all filters (AND logic)
+function applyAllFilters() {
+  if (!state.unfilteredResults) return;
+
+  let filtered = [...state.unfilteredResults];
+
+  for (const filter of state.columnFilters) {
+    filtered = filtered.filter(row => {
+      const cellValue = row[filter.column];
+      if (cellValue === null || cellValue === undefined) {
+        return filter.operator === 'not_equals';
+      }
+
+      let valueStr = String(cellValue);
+      // Handle lookup fields
+      if (valueStr.includes('__LOOKUP__')) {
+        valueStr = valueStr.split('__LOOKUP__')[1];
+      }
+
+      if (filter.operator === 'equals') {
+        return valueStr === filter.value || valueStr.includes(filter.value);
+      } else {
+        return valueStr !== filter.value && !valueStr.includes(filter.value);
+      }
+    });
+  }
+
+  state.results = filtered;
+  renderResultsTable();
+  updateFilterIconState();
+}
+
+// Update filter icon visual state
+function updateFilterIconState() {
+  const filterBtn = document.getElementById('filterBtn');
+  if (filterBtn) {
+    filterBtn.classList.toggle('has-filters', state.columnFilters.length > 0);
+  }
+}
+
+// Update filter indicator bar
+function updateFilterIndicator() {
+  const indicator = document.getElementById('filterIndicator');
+  if (!indicator) return;
+
+  if (state.columnFilters.length > 0) {
+    const totalCount = state.unfilteredResults?.length || 0;
+    const filterCount = state.columnFilters.length;
+    indicator.querySelector('.filter-indicator-text').textContent =
+      `Showing ${state.results.length} of ${totalCount} records (${filterCount} filter${filterCount > 1 ? 's' : ''} applied)`;
+    indicator.classList.remove('hidden');
+  } else {
+    indicator.classList.add('hidden');
+  }
+}
+
+// Format field name for display
+function formatFieldName(key) {
+  return key
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // Handle the view toggle checkbox change
 async function handleViewToggle(checked) {
   console.log('handleViewToggle called:', { checked, hasAuthData: state.hasAuthData });
@@ -1936,6 +2383,10 @@ async function handleViewToggle(checked) {
   if (checked) {
     // Switching to logged-in
     if (state.hasAuthData) {
+      // Fetch user profile if we have a user ID but no profile yet
+      if (state.authUserId && !state.authUserProfile) {
+        fetchUserProfile(state.authUserId);
+      }
       // Data already loaded - just switch view
       switchView('logged-in');
     } else {
@@ -1978,6 +2429,41 @@ function closeAuthModal() {
       toggle.checked = false;
     }
   }
+}
+
+// Extract user ID from cookies (from _u1main cookie for live environment)
+function extractUserIdFromCookies(cookies) {
+  if (!cookies) return null;
+
+  // Look for _u1main cookie (not _u1_testmain or similar test variants)
+  // Format: {appname}_u1main=1773391930879x417643621697376900
+  const u1MainMatch = cookies.match(/(?:^|;\s*)([^;]*_u1main)=([^;]+)/);
+  if (u1MainMatch) {
+    const userId = u1MainMatch[2].trim();
+    console.log('Extracted user ID from _u1main:', userId);
+    return userId;
+  }
+
+  // Fallback: try to extract from _live_u2main cookie
+  // Format: {appname}_live_u2main=bus|<user_id>|<session_id>
+  const u2MainMatch = cookies.match(/(?:^|;\s*)([^;]*_live_u2main)=([^;]+)/);
+  if (u2MainMatch) {
+    const value = u2MainMatch[2].trim();
+    const parts = value.split('|');
+    if (parts.length >= 2 && parts[1].includes('x')) {
+      console.log('Extracted user ID from _live_u2main:', parts[1]);
+      return parts[1];
+    }
+  }
+
+  // Enterprise mode fallback: look for any _u2 cookie with bus| format
+  const u2Match = cookies.match(/(?:^|;\s*)([^;]*_u2[^=]*)=bus\|([^|]+)\|/);
+  if (u2Match && u2Match[2].includes('x')) {
+    console.log('Extracted user ID from u2 cookie:', u2Match[2]);
+    return u2Match[2];
+  }
+
+  return null;
 }
 
 // Parse cookie input from various formats
@@ -2361,11 +2847,24 @@ function renderTabFilter() {
   const showViewToggle = state.enterpriseMode ? state.hasAuthCookies : true;
   if (showViewToggle) {
     const isLoggedIn = state.currentView === 'logged-in';
+    let toggleLabel = 'Logged Out';
+
+    if (isLoggedIn) {
+      if (state.authUserId) {
+        const shortId = state.authUserId.length > 20
+          ? state.authUserId.substring(0, 12) + '...'
+          : state.authUserId;
+        toggleLabel = `Logged in as <span class="user-id-link" onclick="event.stopPropagation(); toggleUserProfilePopover(event)">${shortId}</span>`;
+      } else {
+        toggleLabel = 'Logged In';
+      }
+    }
+
     filtersHtml += `
       <label class="filter-toggle view-filter">
         <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
         <span class="toggle-slider"></span>
-        <span class="toggle-label">${isLoggedIn ? 'Logged In' : 'Logged Out'}</span>
+        <span class="toggle-label">${toggleLabel}</span>
       </label>
     `;
   }
@@ -2397,6 +2896,15 @@ function renderTabFilter() {
   }
 
   container.innerHTML = filtersHtml;
+
+  // Update filter icon visibility based on current view
+  const filterIconContainer = document.getElementById('filterIconContainer');
+  if (filterIconContainer) {
+    const isLoggedIn = state.currentView === 'logged-in';
+    filterIconContainer.classList.toggle('hidden', !isLoggedIn);
+    // Also update the filter icon state (has-filters class)
+    updateFilterIconState();
+  }
 }
 
 // Deterministic endpoint security analysis

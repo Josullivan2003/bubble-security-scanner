@@ -677,6 +677,45 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
   }
 });
 
+// Endpoint to fetch user profile by ID via mget worker
+app.post('/api/mget', async (req, res) => {
+  const { x, y, appName, appUrl, ids } = req.body;
+
+  if (!x || !y || !appName || !appUrl || !ids || !Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'x, y, appName, appUrl, and ids array are required' });
+  }
+
+  try {
+    // Build mget URL from app URL
+    const appUrlObj = new URL(appUrl);
+    const mgetUrl = `${appUrlObj.origin}/elasticsearch/mget`;
+
+    const requestBody = {
+      x,
+      y,
+      appname: appName,
+      ids,
+      url: mgetUrl,
+    };
+    console.log(`[mget] Fetching ${ids.length} user(s) for app: ${appName}`);
+    console.log(`[mget] URL: ${mgetUrl}`);
+
+    const workerResponse = await fetch('https://mget-worker.james-a7a.workers.dev', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(requestBody),
+    });
+
+    const data = await workerResponse.json();
+    console.log(`[mget] Response status: ${workerResponse.status}, found: ${data.body?.docs?.[0]?.found}`);
+
+    res.json(data);
+  } catch (error) {
+    console.error('mget error:', error);
+    res.status(500).json({ error: 'Failed to fetch user data', details: error.message });
+  }
+});
+
 // Helper function to get just the app plan via Puppeteer (fast, lightweight)
 async function getAppPlan(url) {
   let browser = null;
@@ -1758,189 +1797,247 @@ app.post('/api/scan-api-keys', async (req, res) => {
       console.log(`[API Keys] Bubble app object not found after wait, continuing anyway`);
     }
 
-    // Extract API connector data from page context - specifically settings.client_safe
-    const extractedData = await page.evaluate(() => {
-      const result = {
+    // Extract API connector data from page context - stringify inside browser to avoid CBOR limits
+    let extractedData;
+    try {
+      const jsonString = await page.evaluate(() => {
+        const result = {
+          clientSafe: null,
+          apiConnector2: null,
+          appPlan: null,
+          allKeys: [],
+          pages: null,
+          editorUrl: null,
+          debugInfo: {}
+        };
+
+        // Helper to safely get nested property
+        const safeGet = (obj, path) => {
+          try {
+            return path.split('.').reduce((o, k) => o && o[k], obj);
+          } catch (e) {
+            return null;
+          }
+        };
+
+        // Try to extract app_plan from appquery
+        try {
+          result.debugInfo.hasAppquery = !!window.appquery;
+          if (window.appquery) {
+            if (typeof window.appquery.app_plan === 'function') {
+              const planData = window.appquery.app_plan();
+              if (planData) {
+                result.appPlan = {
+                  id: planData.id || planData._id || null,
+                  name: planData.name || planData.display || null
+                };
+              }
+            } else if (window.appquery.app_plan) {
+              const planData = window.appquery.app_plan;
+              result.appPlan = {
+                id: planData.id || planData._id || null,
+                name: planData.name || planData.display || null
+              };
+            }
+          }
+        } catch (e) {
+          result.debugInfo.appPlanError = e.message;
+        }
+
+        // Try to extract pages list from multiple possible locations
+        try {
+          let pageNames = [];
+
+          // Method 1: window.app['%p3'] (common location)
+          if (window.app && window.app['%p3']) {
+            pageNames = Object.keys(window.app['%p3']).slice(0, 100);
+            result.debugInfo.pagesSource = 'app.%p3';
+          }
+
+          // Method 2: Check appquery.page_names if available
+          if (pageNames.length === 0 && window.appquery) {
+            if (typeof window.appquery.page_names === 'function') {
+              const names = window.appquery.page_names();
+              if (Array.isArray(names)) {
+                pageNames = names.slice(0, 100);
+                result.debugInfo.pagesSource = 'appquery.page_names()';
+              }
+            } else if (Array.isArray(window.appquery.page_names)) {
+              pageNames = window.appquery.page_names.slice(0, 100);
+              result.debugInfo.pagesSource = 'appquery.page_names';
+            }
+          }
+
+          // Method 3: Check bubble_page_load_data for pages
+          if (pageNames.length === 0 && window.bubble_page_load_data && window.bubble_page_load_data.pages) {
+            const pages = window.bubble_page_load_data.pages;
+            if (Array.isArray(pages)) {
+              pageNames = pages.map(p => p.name || p['%nm'] || p.slug).filter(Boolean).slice(0, 100);
+              result.debugInfo.pagesSource = 'bubble_page_load_data.pages';
+            } else if (typeof pages === 'object') {
+              pageNames = Object.keys(pages).slice(0, 100);
+              result.debugInfo.pagesSource = 'bubble_page_load_data.pages (keys)';
+            }
+          }
+
+          // Method 4: Search for pages in app.pages
+          if (pageNames.length === 0 && window.app && window.app.pages) {
+            const pages = window.app.pages;
+            if (Array.isArray(pages)) {
+              pageNames = pages.map(p => p.name || p['%nm'] || p.slug).filter(Boolean).slice(0, 100);
+              result.debugInfo.pagesSource = 'app.pages';
+            } else if (typeof pages === 'object') {
+              pageNames = Object.keys(pages).slice(0, 100);
+              result.debugInfo.pagesSource = 'app.pages (keys)';
+            }
+          }
+
+          // Method 5: Look for page list in Settings
+          if (pageNames.length === 0 && window.Settings && window.Settings.pages) {
+            const pages = window.Settings.pages;
+            if (Array.isArray(pages)) {
+              pageNames = pages.map(p => p.name || p['%nm'] || p.slug).filter(Boolean).slice(0, 100);
+              result.debugInfo.pagesSource = 'Settings.pages';
+            }
+          }
+
+          // Method 6: Extract from URL patterns in links
+          if (pageNames.length === 0) {
+            const links = document.querySelectorAll('a[href]');
+            const pageSet = new Set();
+            const baseHost = window.location.host;
+            for (const link of links) {
+              try {
+                const url = new URL(link.href);
+                if (url.host === baseHost && url.pathname !== '/') {
+                  const pageName = url.pathname.split('/')[1];
+                  if (pageName && !pageName.includes('.') && pageName.length < 50) {
+                    pageSet.add(pageName);
+                  }
+                }
+              } catch (e) {}
+            }
+            if (pageSet.size > 0) {
+              pageNames = Array.from(pageSet).slice(0, 100);
+              result.debugInfo.pagesSource = 'link extraction';
+            }
+          }
+
+          // Debug: Log what we found in window.app
+          if (window.app) {
+            result.debugInfo.appKeys = Object.keys(window.app).slice(0, 20);
+          }
+
+          if (pageNames.length > 0) {
+            result.pages = pageNames.map(name => ({ name }));
+          }
+        } catch (e) {
+          result.debugInfo.pagesError = e.message;
+        }
+
+        // Try to extract editor link
+        try {
+          if (window.appquery && typeof window.appquery.get_editor_link === 'function') {
+            result.editorUrl = window.appquery.get_editor_link();
+          }
+        } catch (e) {}
+
+        // Helper to extract keys from client_safe object
+        const extractFromClientSafe = (value, foundAt) => {
+          if (!value || typeof value !== 'object') return false;
+          result.clientSafe = {};
+          for (const [key, val] of Object.entries(value)) {
+            if (typeof val === 'string' && val.length > 0) {
+              result.clientSafe[key] = val;
+              result.allKeys.push({ name: key, value: val });
+            } else if (key === 'apiconnector2' && typeof val === 'object') {
+              try {
+                result.apiConnector2 = JSON.parse(JSON.stringify(val));
+              } catch (e) {}
+            }
+          }
+          result.debugInfo.foundAt = foundAt;
+          return Object.keys(result.clientSafe).length > 0 || result.apiConnector2;
+        };
+
+        // Try direct common paths for client_safe
+        const directPaths = [
+          'settings.client_safe',
+          'Settings.client_safe',
+          'bubble_page_load_data.settings.client_safe',
+          '_bubble_page_load_data.settings.client_safe',
+          'appquery.settings.client_safe',
+          'bubble.settings.client_safe',
+          'Bubble.settings.client_safe',
+          '__BUBBLE_DATA__.settings.client_safe',
+          'bubbleData.settings.client_safe',
+        ];
+
+        for (const path of directPaths) {
+          const value = safeGet(window, path);
+          if (value && typeof value === 'object' && Object.keys(value).length > 0) {
+            if (extractFromClientSafe(value, path)) break;
+          }
+        }
+
+        // If not found, search all window properties
+        if (!result.clientSafe || Object.keys(result.clientSafe).length === 0) {
+          const windowKeys = Object.keys(window);
+          result.debugInfo.searchedKeys = windowKeys.length;
+
+          for (const key of windowKeys) {
+            try {
+              const val = window[key];
+              if (val && typeof val === 'object') {
+                // Check if this object has client_safe
+                if (val.client_safe && typeof val.client_safe === 'object') {
+                  if (extractFromClientSafe(val.client_safe, key + '.client_safe')) break;
+                }
+                // Check nested settings.client_safe
+                if (val.settings && val.settings.client_safe) {
+                  if (extractFromClientSafe(val.settings.client_safe, key + '.settings.client_safe')) break;
+                }
+              }
+            } catch (e) {
+              // Skip inaccessible properties
+            }
+          }
+        }
+
+        // Also check inline scripts if still not found
+        if (!result.clientSafe || Object.keys(result.clientSafe).length === 0) {
+          try {
+            const scripts = document.querySelectorAll('script:not([src])');
+            for (const script of scripts) {
+              const content = script.textContent;
+              const match = content.match(/client_safe\s*[=:]\s*(\{[^}]+\})/);
+              if (match) {
+                try {
+                  const parsed = JSON.parse(match[1]);
+                  if (extractFromClientSafe(parsed, 'inline script')) break;
+                } catch (e) {}
+              }
+            }
+          } catch (e) {
+            result.debugInfo.inlineScriptError = e.message;
+          }
+        }
+
+        // Return as JSON string to avoid CBOR serialization issues
+        return JSON.stringify(result);
+      });
+
+      extractedData = JSON.parse(jsonString);
+    } catch (evalError) {
+      console.log(`[API Keys] page.evaluate failed:`, evalError.message);
+      extractedData = {
         clientSafe: null,
         apiConnector2: null,
         appPlan: null,
         allKeys: [],
-        debugInfo: {}
+        debugInfo: { error: evalError.message }
       };
-
-      // Try to extract app_plan from appquery
-      try {
-        result.debugInfo.hasAppquery = !!window.appquery;
-        if (window.appquery) {
-          result.debugInfo.appqueryKeys = Object.keys(window.appquery).slice(0, 20);
-          result.debugInfo.appPlanType = typeof window.appquery.app_plan;
-
-          // Try as function first
-          if (typeof window.appquery.app_plan === 'function') {
-            const planData = window.appquery.app_plan();
-            if (planData) {
-              result.appPlan = {
-                id: planData.id || planData._id || null,
-                name: planData.name || planData.display || null,
-                raw: JSON.parse(JSON.stringify(planData))
-              };
-            }
-          }
-          // Try as property
-          else if (window.appquery.app_plan) {
-            const planData = window.appquery.app_plan;
-            result.appPlan = {
-              id: planData.id || planData._id || null,
-              name: planData.name || planData.display || null,
-              raw: JSON.parse(JSON.stringify(planData))
-            };
-          }
-        }
-      } catch (e) {
-        result.debugInfo.appPlanError = e.message;
-      }
-
-      // Try to extract pages list from app.%p3
-      try {
-        result.debugInfo.hasApp = !!window.app;
-        if (window.app) {
-          result.debugInfo.appKeys = Object.keys(window.app).slice(0, 30);
-
-          // Look for pages in %p3 property
-          const pagesData = window.app['%p3'];
-          if (pagesData) {
-            result.pages = JSON.parse(JSON.stringify(pagesData));
-          }
-        }
-      } catch (e) {
-        result.debugInfo.pagesError = e.message;
-      }
-
-      // Try to extract editor link from appquery.get_editor_link()
-      try {
-        if (window.appquery && typeof window.appquery.get_editor_link === 'function') {
-          result.editorUrl = window.appquery.get_editor_link();
-        }
-      } catch (e) {
-        result.debugInfo.editorLinkError = e.message;
-      }
-
-      // Helper to safely get nested property
-      const safeGet = (obj, path) => {
-        try {
-          return path.split('.').reduce((o, k) => o && o[k], obj);
-        } catch (e) {
-          return null;
-        }
-      };
-
-      // Search for client_safe in all window properties
-      const searchForClientSafe = () => {
-        // Check all window properties that might contain Bubble data
-        const bubbleVars = [];
-        for (const key of Object.keys(window)) {
-          try {
-            const val = window[key];
-            if (val && typeof val === 'object') {
-              // Check if this object has client_safe
-              if (val.client_safe && typeof val.client_safe === 'object') {
-                bubbleVars.push({ path: key + '.client_safe', value: val.client_safe });
-              }
-              // Check nested settings.client_safe
-              if (val.settings && val.settings.client_safe) {
-                bubbleVars.push({ path: key + '.settings.client_safe', value: val.settings.client_safe });
-              }
-            }
-          } catch (e) {
-            // Skip inaccessible properties
-          }
-        }
-        return bubbleVars;
-      };
-
-      // First, try direct common paths
-      const directPaths = [
-        'settings.client_safe',
-        'Settings.client_safe',
-        'bubble_page_load_data.settings.client_safe',
-        '_bubble_page_load_data.settings.client_safe',
-        'appquery.settings.client_safe',
-        'bubble.settings.client_safe',
-        'Bubble.settings.client_safe',
-        '__BUBBLE_DATA__.settings.client_safe',
-        'bubbleData.settings.client_safe',
-      ];
-
-      for (const path of directPaths) {
-        const value = safeGet(window, path);
-        if (value && typeof value === 'object' && Object.keys(value).length > 0) {
-          result.clientSafe = JSON.parse(JSON.stringify(value));
-          result.debugInfo.foundAt = path;
-          break;
-        }
-      }
-
-      // If not found, search all window properties
-      if (!result.clientSafe) {
-        const found = searchForClientSafe();
-        result.debugInfo.searchResults = found.map(f => f.path);
-        if (found.length > 0) {
-          result.clientSafe = JSON.parse(JSON.stringify(found[0].value));
-          result.debugInfo.foundAt = found[0].path;
-        }
-      }
-
-      // Also look in script tags for inline data
-      if (!result.clientSafe) {
-        const scripts = document.querySelectorAll('script:not([src])');
-        for (const script of scripts) {
-          const content = script.textContent;
-          // Look for client_safe assignment
-          const match = content.match(/client_safe\s*[=:]\s*(\{[\s\S]*?\})\s*[,;}\n]/);
-          if (match) {
-            try {
-              result.clientSafe = JSON.parse(match[1]);
-              result.debugInfo.foundAt = 'inline script';
-              break;
-            } catch (e) {
-              // Try to find apiconnector2 directly
-              const apiMatch = content.match(/apiconnector2\s*[=:]\s*(\{[\s\S]*?\})\s*[,;}\n]/);
-              if (apiMatch) {
-                try {
-                  result.apiConnector2 = JSON.parse(apiMatch[1]);
-                  result.debugInfo.foundAt = 'inline script (apiconnector2 only)';
-                } catch (e2) {}
-              }
-            }
-          }
-        }
-      }
-
-      // Debug: list some global variables that might contain Bubble data
-      result.debugInfo.bubbleLikeVars = Object.keys(window).filter(k =>
-        k.toLowerCase().includes('bubble') ||
-        k.toLowerCase().includes('setting') ||
-        k.toLowerCase().includes('app') ||
-        k === 'settings' ||
-        k === 'Settings'
-      ).slice(0, 15);
-
-      // If we found client_safe, extract all the key-value pairs
-      if (result.clientSafe) {
-        for (const [key, value] of Object.entries(result.clientSafe)) {
-          if (key === 'apiconnector2') {
-            result.apiConnector2 = value;
-          } else if (typeof value === 'string' && value.length > 0) {
-            result.allKeys.push({
-              name: key,
-              value: value
-            });
-          }
-        }
-      }
-
-      return result;
-    });
+    }
 
     console.log(`[API Keys] Debug info:`, JSON.stringify(extractedData.debugInfo, null, 2));
     console.log(`[API Keys] clientSafe found:`, !!extractedData.clientSafe);
@@ -2013,8 +2110,9 @@ app.post('/api/scan-api-keys', async (req, res) => {
 
     // Extract page names (no testing - that's done by /api/test-pages)
     let pageNames = [];
-    if (extractedData.pages) {
-      pageNames = Object.values(extractedData.pages).map(p => p['%nm']).filter(Boolean);
+    if (extractedData.pages && Array.isArray(extractedData.pages)) {
+      // Handle both formats: {name: "..."} (simplified) or {'%nm': "..."} (original)
+      pageNames = extractedData.pages.map(p => p.name || p['%nm']).filter(Boolean);
       console.log(`[API Keys] Pages found: ${pageNames.length}`);
     } else {
       console.log(`[API Keys] Pages not found`);
