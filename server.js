@@ -458,7 +458,7 @@ app.get('/api/data', async (req, res) => {
 
 // Proxy endpoint for fetching table data via encrypt + worker API
 app.post('/api/fetch-table', async (req, res) => {
-  const { x, y, payload, appName, appUrl, cookies, userMode } = req.body;
+  const { x, y, payload, appName, appUrl, cookies, userMode, version } = req.body;
 
   if (!payload || !appName || !appUrl) {
     return res.status(400).json({ error: 'payload, appName, and appUrl are required' });
@@ -472,17 +472,18 @@ app.post('/api/fetch-table', async (req, res) => {
     console.log('[1] INCOMING REQUEST FROM FRONTEND:');
     console.log('    appName:', appName);
     console.log('    appUrl:', appUrl);
+    console.log('    version:', version || 'version-live (default)');
     console.log('    cookies:', cookies || '(none)');
     console.log('    userMode:', userMode || false);
     console.log('    x:', x);
     console.log('    y:', y);
     console.log('    payload:', JSON.stringify(payload, null, 2));
 
-    // If userMode, include appname in encrypt request
-    const encryptRequestBody = userMode
-      ? { x, y, payload, appname: appName }
-      : { x, y, payload };
+    // Always include appname and app_version in encrypt request
+    const versionValue = version ? version.replace('version-', '') : 'live';
+    const encryptRequestBody = { x, y, payload, appname: appName, app_version: versionValue };
     console.log('\n[2] SENDING TO ENCRYPT API:', encryptUrl);
+    console.log('    app_version:', versionValue);
     console.log('    Request body:', JSON.stringify(encryptRequestBody, null, 2));
 
     const encryptResponse = await fetch(encryptUrl, {
@@ -512,14 +513,15 @@ app.post('/api/fetch-table', async (req, res) => {
 
     // Build dynamic elasticsearch URL from app URL when in user mode
     const appUrlObj = new URL(appUrl);
-    const dynamicElasticsearchUrl = `${appUrlObj.origin}/version-live/elasticsearch/search`;
+    const versionPath = version || 'version-live';
+    const dynamicElasticsearchUrl = `${appUrlObj.origin}/${versionPath}/elasticsearch/search`;
 
     const workerPayload = {
       x: encryptData.x,
       y: encryptData.y,
       z: encryptData.z,
       appname: userMode ? appName : '99reviews-43419',
-      url: userMode ? dynamicElasticsearchUrl : 'https://99reviews.io/version-test/elasticsearch/search',
+      url: dynamicElasticsearchUrl,
       ...(cookies && { cookies }),
     };
 
@@ -553,11 +555,13 @@ app.post('/api/fetch-table', async (req, res) => {
 
 // Endpoint for getting accurate table counts via aggregate API (logged-out)
 app.post('/api/aggregate-count', async (req, res) => {
-  const { x, y, appName, tableType } = req.body;
+  const { x, y, appName, tableType, version } = req.body;
 
   if (!x || !y || !appName || !tableType) {
     return res.status(400).json({ error: 'x, y, appName, and tableType are required' });
   }
+
+  const versionValue = version ? version.replace('version-', '') : 'live';
 
   try {
     // Step 1: Call aggregate API to get encrypted params
@@ -572,6 +576,7 @@ app.post('/api/aggregate-count', async (req, res) => {
         appname: '99reviews-43419',
         target_appname: appName,
         type: tableType,
+        app_version: versionValue,
       }),
     });
 
@@ -614,11 +619,13 @@ app.post('/api/aggregate-count', async (req, res) => {
 
 // Endpoint for getting accurate table counts via aggregate API (logged-in with cookies)
 app.post('/api/aggregate-count-auth', async (req, res) => {
-  const { x, y, appName, appUrl, tableType, cookies } = req.body;
+  const { x, y, appName, appUrl, tableType, cookies, version } = req.body;
 
   if (!x || !y || !appName || !appUrl || !tableType) {
     return res.status(400).json({ error: 'x, y, appName, appUrl, and tableType are required' });
   }
+
+  const versionValue = version ? version.replace('version-', '') : 'live';
 
   try {
     // Step 1: Call aggregate API to get z (using user's x, y, appname)
@@ -632,6 +639,7 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
         y,
         appname: appName,
         type: tableType,
+        app_version: versionValue,
       }),
     });
 

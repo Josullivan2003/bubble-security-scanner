@@ -65,6 +65,7 @@ let state = {
   },
   manualApiOverrides: {},         // Manual API call severity: { "connectorName|callName": { risk, issue } }
   apiKeysSearch: '',              // Search query for API keys tab
+  version: 'version-live',        // Bubble version to query (e.g., 'version-live', 'version-test')
 };
 
 // Initialize
@@ -109,6 +110,14 @@ function parseUrlParams() {
   if (params.enterprise === 'yes') {
     state.enterpriseMode = true;
     console.log('Enterprise mode enabled - credentials required before scanning');
+  }
+  if (params.version) {
+    // Allow shorthand (e.g., "test") or full form (e.g., "version-test")
+    state.version = params.version.startsWith('version-') ? params.version : `version-${params.version}`;
+    console.log('Version override:', state.version);
+  } else {
+    state.version = 'version-live';
+    console.log('Using default version:', state.version);
   }
 
   // Auto-populate and trigger scan if app URL provided
@@ -388,7 +397,7 @@ async function analyzeTableSensitivity(table) {
 // Fetch a small sample of data from a table for sensitivity analysis
 async function fetchTableSample(tableId) {
   const payload = {
-    app_version: 'live',
+    app_version: state.version.replace('version-', ''),
     appname: state.appName,
     constraints: [],
     from: 0,
@@ -407,9 +416,10 @@ async function fetchTableSample(tableId) {
       payload: payload,
       appName: state.appName,
       appUrl: state.bubbleUrl,
+      version: state.version,
       ...(state.enterpriseMode && { userMode: true }),
     };
-    console.log('fetchTableSample sending:', { x: state.xValue, y: state.yValue, enterpriseMode: state.enterpriseMode });
+    console.log('fetchTableSample sending:', { x: state.xValue, y: state.yValue, enterpriseMode: state.enterpriseMode, version: state.version });
     const response = await fetch('/api/fetch-table', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -517,6 +527,7 @@ async function fetchTableCount(tableId) {
     y: state.yValue,
     appName: state.appName,
     tableType: tableType,
+    version: state.version,
   };
 
   // Add appUrl for enterprise mode (required by auth endpoint)
@@ -554,7 +565,7 @@ async function fetchTableCount(tableId) {
 // Check if a table only contains metadata (no real data fields)
 async function checkMetadataOnly(tableId) {
   const payload = {
-    app_version: 'live',
+    app_version: state.version.replace('version-', ''),
     appname: state.appName,
     constraints: [],
     from: 0,
@@ -575,6 +586,7 @@ async function checkMetadataOnly(tableId) {
         payload: payload,
         appName: state.appName,
         appUrl: state.bubbleUrl,
+        version: state.version,
         ...(state.enterpriseMode && { userMode: true }),
       }),
     });
@@ -735,7 +747,7 @@ async function selectTable(tableId, displayName) {
   try {
     // Build payload for encrypt API
     const payload = {
-      app_version: 'live',
+      app_version: state.version.replace('version-', ''),
       appname: state.appName,
       constraints: [],
       from: 0,
@@ -758,6 +770,7 @@ async function selectTable(tableId, displayName) {
       payload: payload,
       appName: state.appName,
       appUrl: state.bubbleUrl,
+      version: state.version,
       ...(needsUserMode && { userMode: true }),
       ...(useAuth && { cookies: state.authCookies }),
     };
@@ -1815,6 +1828,7 @@ async function fetchAuthenticatedTableCount(table) {
         appUrl: state.bubbleUrl,
         tableType: tableType,
         cookies: state.authCookies,
+        version: state.version,
       }),
     });
 
@@ -1909,7 +1923,7 @@ async function analyzeTableAuthenticated(table) {
 // Fetch table sample with authenticated credentials
 async function fetchTableSampleAuthenticated(tableId) {
   const payload = {
-    app_version: 'live',
+    app_version: state.version.replace('version-', ''),
     appname: state.appName,
     constraints: [],
     from: 0,
@@ -1930,6 +1944,7 @@ async function fetchTableSampleAuthenticated(tableId) {
         payload: payload,
         appName: state.appName,
         appUrl: state.bubbleUrl,
+        version: state.version,
         cookies: state.authCookies,
         userMode: true,
       }),
