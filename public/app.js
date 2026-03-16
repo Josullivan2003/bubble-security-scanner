@@ -2009,6 +2009,7 @@ async function fetchUserProfile(userId) {
         appName: state.appName,
         appUrl: state.bubbleUrl,
         ids: [userId],
+        version: state.version,
       }),
     });
 
