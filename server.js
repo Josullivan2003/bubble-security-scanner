@@ -479,9 +479,20 @@ app.post('/api/fetch-table', async (req, res) => {
     console.log('    y:', y);
     console.log('    payload:', JSON.stringify(payload, null, 2));
 
-    // Always include appname and app_version in encrypt request
+    // Build encrypt request based on mode
     const versionValue = version ? version.replace('version-', '') : 'live';
-    const encryptRequestBody = { x, y, payload, appname: appName, app_version: versionValue };
+    const isTestVersion = version && version !== 'version-live';
+    let encryptRequestBody;
+    if (userMode) {
+      // userMode: use target app directly
+      encryptRequestBody = { x, y, payload, appname: appName, app_version: versionValue };
+    } else if (isTestVersion) {
+      // non-userMode with test version: use 99reviews as proxy with target_appname
+      encryptRequestBody = { x, y, payload, appname: '99reviews-43419', target_appname: appName, app_version: versionValue };
+    } else {
+      // non-userMode with live version: simple request
+      encryptRequestBody = { x, y, payload };
+    }
     console.log('\n[2] SENDING TO ENCRYPT API:', encryptUrl);
     console.log('    app_version:', versionValue);
     console.log('    Request body:', JSON.stringify(encryptRequestBody, null, 2));
@@ -513,15 +524,19 @@ app.post('/api/fetch-table', async (req, res) => {
 
     // Build dynamic elasticsearch URL from app URL when in user mode
     const appUrlObj = new URL(appUrl);
-    const versionPath = version || 'version-live';
-    const dynamicElasticsearchUrl = `${appUrlObj.origin}/${versionPath}/elasticsearch/search`;
+    const dynamicElasticsearchUrl = `${appUrlObj.origin}/${version || 'version-live'}/elasticsearch/search`;
+
+    // For non-userMode, use 99reviews as proxy; for userMode, use target app directly
+    const proxyUrl = isTestVersion
+      ? 'https://99reviews.io/version-test/elasticsearch/search'
+      : 'https://99reviews.io/version-live/elasticsearch/search';
 
     const workerPayload = {
       x: encryptData.x,
       y: encryptData.y,
       z: encryptData.z,
       appname: userMode ? appName : '99reviews-43419',
-      url: dynamicElasticsearchUrl,
+      url: userMode ? dynamicElasticsearchUrl : proxyUrl,
       ...(cookies && { cookies }),
     };
 
@@ -587,6 +602,7 @@ app.post('/api/aggregate-count', async (req, res) => {
     }
 
     // Step 2: Call aggregate-worker to get the count
+    const versionPath = version || 'version-live';
     const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -594,7 +610,7 @@ app.post('/api/aggregate-count', async (req, res) => {
         x: aggregateData.x,
         y: aggregateData.y,
         z: aggregateData.z,
-        url: 'https://99reviews.io/elasticsearch/maggregate',
+        url: `https://99reviews.io/${versionPath}/elasticsearch/maggregate`,
       }),
     });
 
@@ -652,7 +668,8 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
 
     // Step 2: Call aggregate-worker with user's x, y, z, url, and cookies
     const appUrlObj = new URL(appUrl);
-    const maggregateUrl = `${appUrlObj.origin}/elasticsearch/maggregate`;
+    const versionPath = version || 'version-live';
+    const maggregateUrl = `${appUrlObj.origin}/${versionPath}/elasticsearch/maggregate`;
 
     const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
       method: 'POST',
@@ -694,11 +711,12 @@ app.post('/api/mget', async (req, res) => {
   }
 
   const versionValue = version ? version.replace('version-', '') : 'live';
+  const versionPath = version || 'version-live';
 
   try {
-    // Build mget URL from app URL
+    // Build mget URL from app URL with version path
     const appUrlObj = new URL(appUrl);
-    const mgetUrl = `${appUrlObj.origin}/elasticsearch/mget`;
+    const mgetUrl = `${appUrlObj.origin}/${versionPath}/elasticsearch/mget`;
 
     const requestBody = {
       x,
