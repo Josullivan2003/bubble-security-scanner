@@ -1850,8 +1850,25 @@ app.post('/api/scan-api-keys', async (req, res) => {
 
           // Method 1: window.app['%p3'] (common location)
           if (window.app && window.app['%p3']) {
-            pageNames = Object.keys(window.app['%p3']).slice(0, 100);
+            const pagesObj = window.app['%p3'];
+            const pageIds = Object.keys(pagesObj).slice(0, 100);
+            // Extract actual page names from each page object
+            pageNames = pageIds.map(id => {
+              const page = pagesObj[id];
+              if (page && typeof page === 'object') {
+                // Try common name properties
+                return page['%nm'] || page.name || page.slug || id;
+              }
+              return id;
+            }).filter(Boolean);
             result.debugInfo.pagesSource = 'app.%p3';
+            // Debug: sample page structure
+            if (pageIds.length > 0) {
+              const samplePage = pagesObj[pageIds[0]];
+              if (samplePage) {
+                result.debugInfo.samplePageKeys = Object.keys(samplePage).slice(0, 10);
+              }
+            }
           }
 
           // Method 2: Check appquery.page_names if available
