@@ -2015,6 +2015,7 @@ async function fetchUserProfile(userId) {
         appUrl: state.bubbleUrl,
         ids: [userId],
         version: state.version,
+        cookies: state.authCookies,
       }),
     });
 

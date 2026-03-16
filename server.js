@@ -687,7 +687,7 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
 
 // Endpoint to fetch user profile by ID via mget worker
 app.post('/api/mget', async (req, res) => {
-  const { x, y, appName, appUrl, ids, version } = req.body;
+  const { x, y, appName, appUrl, ids, version, cookies } = req.body;
 
   if (!x || !y || !appName || !appUrl || !ids || !Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ error: 'x, y, appName, appUrl, and ids array are required' });
@@ -707,6 +707,7 @@ app.post('/api/mget', async (req, res) => {
       ids,
       url: mgetUrl,
       app_version: versionValue,
+      ...(cookies && { cookies }),
     };
     console.log(`[mget] Fetching ${ids.length} user(s) for app: ${appName}`);
     console.log(`[mget] URL: ${mgetUrl}`);
