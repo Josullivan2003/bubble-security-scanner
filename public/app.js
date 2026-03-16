@@ -1643,23 +1643,17 @@ async function runAuthenticatedScan() {
     if (cookies) {
       let hasU1, hasU2, hasSig;
 
-      if (state.enterpriseMode) {
-        // Enterprise mode: Accept broader cookie formats
-        hasU1 = cookies.match(/_u1[a-z0-9]*=/);
-        hasU2 = cookies.match(/_u2[a-z0-9]*=/);
-        hasSig = cookies.match(/_u2[a-z0-9]*\.sig=/);
+      // Version-aware cookie matching
+      const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
+
+      if (versionKey === 'test') {
+        hasU1 = cookies.includes('_u1_testmain=');
+        hasU2 = cookies.includes('_test_u2main=');
+        hasSig = cookies.includes('_test_u2main.sig=');
       } else {
-        // Normal mode: Strict cookie matching based on version
-        const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
-        if (versionKey === 'test') {
-          hasU1 = cookies.match(/_u1_testmain=/);
-          hasU2 = cookies.includes('_test_u2main=');
-          hasSig = cookies.includes('_test_u2main.sig=');
-        } else {
-          hasU1 = cookies.match(/_u1main=/);
-          hasU2 = cookies.includes('_live_u2main=');
-          hasSig = cookies.includes('_live_u2main.sig=');
-        }
+        hasU1 = cookies.includes('_u1main=');
+        hasU2 = cookies.includes('_live_u2main=');
+        hasSig = cookies.includes('_live_u2main.sig=');
       }
 
       if (!hasU1 || !hasU2 || !hasSig) {
