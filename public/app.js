@@ -1649,10 +1649,17 @@ async function runAuthenticatedScan() {
         hasU2 = cookies.match(/_u2[a-z0-9]*=/);
         hasSig = cookies.match(/_u2[a-z0-9]*\.sig=/);
       } else {
-        // Normal mode: Strict cookie matching
-        hasU1 = cookies.match(/_u1main=/);
-        hasU2 = cookies.includes('_live_u2main=');
-        hasSig = cookies.includes('_live_u2main.sig=');
+        // Normal mode: Strict cookie matching based on version
+        const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
+        if (versionKey === 'test') {
+          hasU1 = cookies.match(/_u1_testmain=/);
+          hasU2 = cookies.includes('_test_u2main=');
+          hasSig = cookies.includes('_test_u2main.sig=');
+        } else {
+          hasU1 = cookies.match(/_u1main=/);
+          hasU2 = cookies.includes('_live_u2main=');
+          hasSig = cookies.includes('_live_u2main.sig=');
+        }
       }
 
       if (!hasU1 || !hasU2 || !hasSig) {
@@ -2447,32 +2454,45 @@ function closeAuthModal() {
   }
 }
 
-// Extract user ID from cookies (from _u1main cookie for live environment)
+// Extract user ID from cookies based on version (test or live)
 function extractUserIdFromCookies(cookies) {
   if (!cookies) return null;
 
-  // Look for _u1main cookie (not _u1_testmain or similar test variants)
-  // Format: {appname}_u1main=1773391930879x417643621697376900
-  const u1MainMatch = cookies.match(/(?:^|;\s*)([^;]*_u1main)=([^;]+)/);
-  if (u1MainMatch) {
-    const userId = u1MainMatch[2].trim();
-    console.log('Extracted user ID from _u1main:', userId);
-    return userId;
+  const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
+  console.log('Extracting user ID for version:', versionKey);
+
+  // For test version: look for _u1_testmain cookie
+  // For live version: look for _u1main cookie (not _u1_testmain)
+  if (versionKey === 'test') {
+    const u1TestMatch = cookies.match(/(?:^|;\s*)([^;]*_u1_testmain)=([^;]+)/);
+    if (u1TestMatch) {
+      const userId = u1TestMatch[2].trim();
+      console.log('Extracted user ID from _u1_testmain:', userId);
+      return userId;
+    }
+  } else {
+    const u1MainMatch = cookies.match(/(?:^|;\s*)([^;]*_u1main)=([^;]+)/);
+    if (u1MainMatch && !u1MainMatch[1].includes('_test')) {
+      const userId = u1MainMatch[2].trim();
+      console.log('Extracted user ID from _u1main:', userId);
+      return userId;
+    }
   }
 
-  // Fallback: try to extract from _live_u2main cookie
-  // Format: {appname}_live_u2main=bus|<user_id>|<session_id>
-  const u2MainMatch = cookies.match(/(?:^|;\s*)([^;]*_live_u2main)=([^;]+)/);
+  // Fallback: try to extract from _test_u2main or _live_u2main cookie based on version
+  // Format: {appname}_{version}_u2main=bus|<user_id>|<session_id>
+  const u2Pattern = new RegExp(`(?:^|;\\s*)([^;]*_${versionKey}_u2main)=([^;]+)`);
+  const u2MainMatch = cookies.match(u2Pattern);
   if (u2MainMatch) {
     const value = u2MainMatch[2].trim();
     const parts = value.split('|');
     if (parts.length >= 2 && parts[1].includes('x')) {
-      console.log('Extracted user ID from _live_u2main:', parts[1]);
+      console.log(`Extracted user ID from _${versionKey}_u2main:`, parts[1]);
       return parts[1];
     }
   }
 
-  // Enterprise mode fallback: look for any _u2 cookie with bus| format
+  // Final fallback: look for any _u2 cookie with bus| format
   const u2Match = cookies.match(/(?:^|;\s*)([^;]*_u2[^=]*)=bus\|([^|]+)\|/);
   if (u2Match && u2Match[2].includes('x')) {
     console.log('Extracted user ID from u2 cookie:', u2Match[2]);
