@@ -1158,6 +1158,25 @@ button:disabled {
   transform: translateX(16px);
 }
 
+/* Toggle switch wrapper - prevents label text from toggling */
+.toggle-switch {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.toggle-switch input {
+  display: none;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: linear-gradient(135deg, #DE5D0D, #F59E0B);
+}
+
+.toggle-switch input:checked + .toggle-slider::after {
+  transform: translateX(16px);
+}
+
 /* View filter toggle (logged-in/logged-out) */
 .filter-toggle.view-filter {
   padding-right: 1rem;

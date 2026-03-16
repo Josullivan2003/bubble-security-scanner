@@ -2867,11 +2867,13 @@ function renderTabFilter() {
     }
 
     filtersHtml += `
-      <label class="filter-toggle view-filter">
-        <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
-        <span class="toggle-slider"></span>
+      <div class="filter-toggle view-filter">
+        <label class="toggle-switch">
+          <input type="checkbox" id="viewToggle" ${isLoggedIn ? 'checked' : ''} onchange="handleViewToggle(this.checked)">
+          <span class="toggle-slider"></span>
+        </label>
         <span class="toggle-label">${toggleLabel}</span>
-      </label>
+      </div>
     `;
   }
 
