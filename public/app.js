@@ -2505,32 +2505,28 @@ function parseCookieInput(input) {
   console.log('parseCookieInput called with:', input.substring(0, 100));
   const parsedCookies = [];
 
-  // Helper to check if cookie is a live auth cookie (not test/debug variants)
-  function isLiveAuthCookie(name) {
-    // Skip test/debug cookies
-    if (name.includes('_test') || name.includes('debug_mode')) {
+  // Helper to check if cookie matches the current version (test or live)
+  function isAuthCookie(name) {
+    const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
+
+    // Skip debug cookies
+    if (name.includes('debug_mode')) {
       return false;
     }
 
-    if (state.enterpriseMode) {
-      // Enterprise mode: Accept broader cookie formats
-      // Match various Bubble u1 cookie formats:
-      // - {appname}_u1main (standard)
-      // - {appname}_u1{version} like _u1d255
-      if (name.match(/_u1[a-z0-9]*$/) && !name.includes('_u1_')) {
+    if (versionKey === 'test') {
+      // Test version: look for test cookies
+      // Match: {appname}_u1_testmain
+      if (name.includes('_u1_testmain')) {
         return true;
       }
-
-      // Match various Bubble u2 cookie formats:
-      // - {appname}_live_u2main (standard)
-      // - {appname}_{deployment}_u2{version} like _52m_u2d255
-      // - Also match .sig variants
-      if (name.match(/_u2[a-z0-9]*(\.sig)?$/)) {
+      // Match: {appname}_test_u2main or {appname}_test_u2main.sig
+      if (name.includes('_test_u2main')) {
         return true;
       }
     } else {
-      // Normal mode: Strict cookie matching
-      // Match: {appname}_u1main (ends with _u1main, not _u1_testmain or _u1_9325ymain)
+      // Live version: look for live cookies
+      // Match: {appname}_u1main (ends with _u1main, not _u1_testmain)
       if (name.match(/_u1main$/) && !name.includes('_u1_')) {
         return true;
       }
@@ -2552,9 +2548,9 @@ function parseCookieInput(input) {
         const eqIndex = trimmed.indexOf('=');
         const name = trimmed.substring(0, eqIndex).trim();
         const value = trimmed.substring(eqIndex + 1).trim();
-        if (isLiveAuthCookie(name)) {
+        if (isAuthCookie(name)) {
           parsedCookies.push(`${name}=${value}`);
-          console.log('Found live auth cookie:', name);
+          console.log('Found auth cookie:', name);
         }
       }
     }
@@ -2569,7 +2565,7 @@ function parseCookieInput(input) {
         if (parts.length >= 2) {
           const name = parts[0].trim();
           const value = parts[1].trim();
-          if (isLiveAuthCookie(name)) {
+          if (isAuthCookie(name)) {
             parsedCookies.push(`${name}=${value}`);
           }
         }
@@ -2583,7 +2579,7 @@ function parseCookieInput(input) {
             const eqIndex = trimmed.indexOf('=');
             const name = trimmed.substring(0, eqIndex).trim();
             const value = trimmed.substring(eqIndex + 1).trim();
-            if (isLiveAuthCookie(name)) {
+            if (isAuthCookie(name)) {
               parsedCookies.push(`${name}=${value}`);
             }
           }
@@ -2594,7 +2590,7 @@ function parseCookieInput(input) {
         const eqIndex = line.indexOf('=');
         const name = line.substring(0, eqIndex).trim();
         const value = line.substring(eqIndex + 1).trim().split(/\s+/)[0];
-        if (isLiveAuthCookie(name)) {
+        if (isAuthCookie(name)) {
           parsedCookies.push(`${name}=${value}`);
         }
       }
@@ -2604,7 +2600,7 @@ function parseCookieInput(input) {
         if (parts.length >= 2) {
           const name = parts[0];
           const value = parts[1];
-          if (isLiveAuthCookie(name)) {
+          if (isAuthCookie(name)) {
             parsedCookies.push(`${name}=${value}`);
           }
         }
@@ -2623,7 +2619,7 @@ function parseCookieInput(input) {
     return order(a) - order(b);
   });
 
-  console.log('Extracted live auth cookies:', parsedCookies);
+  console.log('Extracted auth cookies:', parsedCookies);
   console.log('Final cookie string:', parsedCookies.join('; '));
   return parsedCookies.length > 0 ? parsedCookies.join('; ') : null;
 }
