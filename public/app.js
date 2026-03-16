@@ -1645,15 +1645,19 @@ async function runAuthenticatedScan() {
 
       // Version-aware cookie matching
       const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
+      console.log('Cookie validation - version:', versionKey);
+      console.log('Cookie validation - cookies length:', cookies.length);
 
       if (versionKey === 'test') {
         hasU1 = cookies.includes('_u1_testmain=');
         hasU2 = cookies.includes('_test_u2main=');
         hasSig = cookies.includes('_test_u2main.sig=');
+        console.log('Test mode - hasU1:', hasU1, 'hasU2:', hasU2, 'hasSig:', hasSig);
       } else {
         hasU1 = cookies.includes('_u1main=');
         hasU2 = cookies.includes('_live_u2main=');
         hasSig = cookies.includes('_live_u2main.sig=');
+        console.log('Live mode - hasU1:', hasU1, 'hasU2:', hasU2, 'hasSig:', hasSig);
       }
 
       if (!hasU1 || !hasU2 || !hasSig) {
