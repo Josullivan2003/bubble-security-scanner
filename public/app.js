@@ -2015,7 +2015,7 @@ async function fetchUserProfile(userId) {
         appUrl: state.bubbleUrl,
         ids: [userId],
         version: state.version,
-        ...(state.currentView === 'logged-in' && state.authCookies && { cookies: state.authCookies }),
+        ...(state.authCookies && { cookies: state.authCookies }),
       }),
     });
 

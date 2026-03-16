@@ -709,8 +709,13 @@ app.post('/api/mget', async (req, res) => {
       app_version: versionValue,
       ...(cookies && { cookies }),
     };
+    console.log(`\n========== MGET REQUEST ==========`);
     console.log(`[mget] Fetching ${ids.length} user(s) for app: ${appName}`);
     console.log(`[mget] URL: ${mgetUrl}`);
+    console.log(`[mget] IDs:`, ids);
+    console.log(`[mget] app_version:`, versionValue);
+    console.log(`[mget] cookies:`, cookies ? cookies.substring(0, 100) + '...' : '(none)');
+    console.log(`[mget] Full request body:`, JSON.stringify(requestBody, null, 2));
 
     const workerResponse = await fetch('https://mget-worker.james-a7a.workers.dev', {
       method: 'POST',
