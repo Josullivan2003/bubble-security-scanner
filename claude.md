@@ -85,6 +85,32 @@ All AI endpoints return JSON responses.
 
 **Vercel:** Configured via `vercel.json` with 60s function timeout and 1024MB memory. All routes rewrite to server.js.
 
+## Version Parameter & Proxy Pattern (CRITICAL)
+
+The fetch-table API uses 99reviews as a proxy to scan other Bubble apps. **Do not change this pattern.**
+
+### Encrypt API Request Patterns
+
+| Mode | appname | target_appname | app_version |
+|------|---------|----------------|-------------|
+| Non-userMode + live | *(omit)* | *(omit)* | *(omit)* |
+| Non-userMode + test | `99reviews-43419` | `{targetApp}` | `test` |
+| userMode (any version) | `{targetApp}` | *(omit)* | `live` or `test` |
+
+### Worker API Request Patterns
+
+| Mode | appname | url |
+|------|---------|-----|
+| Non-userMode | `99reviews-43419` | `https://99reviews.io/version-{live\|test}/elasticsearch/search` |
+| userMode | `{targetApp}` | `https://{targetAppUrl}/version-{live\|test}/elasticsearch/search` |
+
+### Key Rules
+
+1. **Non-userMode uses 99reviews as proxy** - The `z` value (encrypted payload) contains the target app's info, but the worker call goes to 99reviews
+2. **Use `target_appname` for non-userMode + test** - Must match the aggregate API pattern
+3. **Never put appname/app_version in encrypt request for non-userMode + live** - Keep it simple: `{ x, y, payload }`
+4. **URL version path matters** - Must include `/version-live/` or `/version-test/` in the elasticsearch URL
+
 ## Important Notes
 
 - This tool is for authorized security testing only
