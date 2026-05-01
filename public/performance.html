@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bubble App Performance Scanner</title>
+  <link rel="stylesheet" href="styles.css?v=59">
+</head>
+<body>
+  <!-- Decorative circles -->
+  <div class="decorative-circle decorative-circle-top-right"></div>
+  <div class="decorative-circle decorative-circle-bottom-left"></div>
+
+  <div class="container">
+    <div class="logo-container">
+      <img src="logo.png" alt="NotCode Logo" class="logo">
+    </div>
+
+    <header>
+      <h1>Performance Scanner</h1>
+      <p class="subtitle">Analyze your Bubble.io application performance</p>
+    </header>
+
+    <!-- Step 1: URL Input -->
+    <section id="step1" class="step active">
+      <div class="step-header">
+        <span class="step-number">1</span>
+        <h2>Enter Bubble App URL</h2>
+      </div>
+      <div class="input-group">
+        <input
+          type="text"
+          id="bubbleUrl"
+          placeholder="bubble.io"
+          autocomplete="off"
+        >
+        <button id="scanBtn" onclick="startScan()">Scan App</button>
+      </div>
+      <div id="step1Error" class="error-box hidden"></div>
+    </section>
+
+    <!-- Step 2: Performance Analysis -->
+    <section id="step2" class="step hidden">
+      <div class="step-header">
+        <span class="step-number">2</span>
+        <h2>Performance Analysis</h2>
+        <button id="generatePdfBtn" class="pdf-btn hidden" onclick="generatePDF()">Export PDF</button>
+      </div>
+
+      <!-- Pages Panel -->
+      <div id="pagesPanel" class="tab-panel">
+        <div id="pagesLoading" class="endpoints-loading hidden">
+          <div class="spinner-small"></div>
+          <span>Loading pages...</span>
+        </div>
+        <div id="pagesEmpty" class="endpoints-empty hidden">
+          <p>No pages found for this application.</p>
+        </div>
+        <div id="pagesList" class="pages-list"></div>
+      </div>
+
+      <div id="step2Error" class="error-box hidden"></div>
+    </section>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay hidden">
+      <div class="spinner"></div>
+      <span id="loadingText">Scanning...</span>
+    </div>
+  </div>
+
+  <!-- Page Metrics Sidebar -->
+  <div id="metricsSidebar" class="user-sidebar">
+    <div class="sidebar-header">
+      <h3 id="sidebarPageName">Page Metrics</h3>
+      <button class="sidebar-close" onclick="closeSidebar()">&times;</button>
+    </div>
+    <div id="sidebarContent" class="sidebar-content">
+      <!-- Metrics content rendered here -->
+    </div>
+  </div>
+
+  <script src="performance.js?v=6"></script>
+</body>
+</html>

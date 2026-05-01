@@ -11,9 +11,10 @@ Bubble App Security Scanner - a web tool for auditing Bubble.io applications to 
 ```bash
 npm install       # Install dependencies
 npm start         # Run server on port 3000
+npm run dev       # Same as npm start (for development)
 ```
 
-Requires Node.js 20.x (see .nvmrc/.node-version).
+Requires Node.js 20.x (see .nvmrc/.node-version). Uses ES modules (`"type": "module"`).
 
 ## Required Environment Variables
 
@@ -21,7 +22,22 @@ Create a `.env` file with:
 ```
 ANTHROPIC_API_KEY=your_api_key_here
 BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
+CLOUDFLARE_ACCOUNT_ID=your_id_here  # Optional: for /api/extract-contact
+CLOUDFLARE_API_TOKEN=your_token_here  # Optional: for /api/extract-contact
 ```
+
+## File Structure
+
+```
+server.js           # Express backend (~3500 lines)
+public/
+  app.js            # Frontend logic (~5400 lines)
+  index.html        # Single page UI
+  styles.css        # Glassmorphism CSS (~5400 lines)
+vercel.json         # Vercel deployment config
+```
+
+No test suite exists in this project.
 
 ## Architecture
 
@@ -33,12 +49,13 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 
 **Scan Modes:**
 - **Normal mode** - Fetches data via Cloudflare Worker proxy with encryption params
+- **User mode** (`?user=yes`) - Shows auth scan section for comparing logged-out vs logged-in data
 - **Enterprise mode** (`?enterprise=yes`) - Requires user credentials (x, y values) before scanning; runs both logged-out and logged-in scans; cookies are optional
 
 **Data Flow:**
 1. User enters Bubble.io app URL
-2. Backend fetches schema via AWS Lambda (`/api/schema`)
-3. Backend fetches metadata via Bubble API (`/api/meta`)
+2. Backend fetches app info via Puppeteer (`/api/app-info`)
+3. Backend fetches schema via AWS Lambda (`/api/schema`)
 4. For each table with data, frontend requests sample data via encrypted worker API (`/api/fetch-table`)
 5. Claude AI analyzes columns for sensitivity (`/api/analyze-columns`)
 6. Table sensitivity is derived from column-level analysis
@@ -51,10 +68,11 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 - `state.activeTab` - Current UI tab ('tables' | 'endpoints' | 'keys' | 'pages')
 - `state.enterpriseMode` - If true, requires credentials before scanning
 - `state.currentView` - 'logged-out' | 'logged-in' for comparing data exposure
+- `state.loggedOutData` / `state.loggedInData` - Separate storage for comparison views
 
 **External APIs:**
-- AWS Lambda for DBML schema extraction
-- Cloudflare Worker for encrypted Bubble data access (uses x, y, z encryption params)
+- AWS Lambda for DBML schema extraction and encryption (`/prod/encrypt`, `/prod/aggregate`)
+- Cloudflare Worker (`auth-worker.james-a7a.workers.dev`) for encrypted Bubble data access
 - Anthropic Claude API for sensitivity classification (model: `claude-sonnet-4-20250514`)
 - Browserless.io for headless Chrome in serverless environments
 
@@ -64,22 +82,35 @@ BROWSERLESS_API_KEY=your_key_here  # Optional: for serverless/Vercel deployment
 - `POST /api/analyze-sensitivity` - Table-level analysis (schema-based)
 - `POST /api/analyze-columns` - Column-level analysis with sample data
 - `POST /api/generate-summary` - Prioritized summary of critical exposures
+- `POST /api/generate-table-descriptions` - AI descriptions for tables
 - `POST /api/analyze-endpoint-risk` - Workflow API endpoint risk assessment
 - `POST /api/analyze-api-exposure` - API key exposure analysis
 
 **Data Fetching:**
 - `GET /api/schema` - Fetch DBML schema via AWS Lambda
-- `GET /api/meta` - Fetch Bubble app metadata
-- `POST /api/fetch-table` - Fetch table data via encrypted worker
+- `POST /api/fetch-table` - Fetch table data via encrypted worker (main data endpoint)
+- `POST /api/mget` - Multi-get records by ID (used for user profile lookup)
+- `POST /api/aggregate-count` - Get record counts for tables
+- `POST /api/aggregate-count-auth` - Record counts with auth cookies
+- `POST /api/aggregate-count-constrained` - Constrained record counts
+- `POST /api/aggregate-column-distinct` - Get distinct column values
 - `POST /api/workflows` - Parse workflow API definitions
 
-**Page/Editor Scanning (Puppeteer):**
-- `POST /api/scan-api-keys` - Scan client-side JS for exposed keys
-- `POST /api/test-pages` - Test page access with pagination
-- `GET /api/test-pages-stream` - SSE streaming for page tests
-- `POST /api/app-plan` - Get Bubble app plan info
+**Authentication & Audit:**
+- `POST /api/extract-cookies` - Extract auth cookies from Puppeteer session
+- `POST /api/audit` - Access audit comparing logged-out vs logged-in visibility
+- `POST /api/debug-compare` - Debug endpoint for data comparison
 
-All AI endpoints return JSON responses.
+**Page/Editor Scanning (Puppeteer):**
+- `POST /api/scan-api-keys` - Scan client-side JS for exposed API keys
+- `POST /api/test-pages` - Test page access with pagination (20 pages/batch)
+- `GET /api/test-pages-stream` - SSE streaming for real-time page test results
+- `POST /api/app-plan` - Get Bubble app plan info
+- `POST /api/admin-email` - Get Bubble app admin email from appquery.custom_domain_admin_email()
+- `POST /api/app-info` - Get Bubble app ID and favicon from appquery.id() and appquery.favicon()
+- `POST /api/extract-contact` - Extract contact email and LinkedIn using Cloudflare Browser Rendering AI
+
+All AI endpoints return JSON responses. SSE endpoints use `text/event-stream` content type.
 
 ## Deployment
 
@@ -111,11 +142,32 @@ The fetch-table API uses 99reviews as a proxy to scan other Bubble apps. **Do no
 3. **Never put appname/app_version in encrypt request for non-userMode + live** - Keep it simple: `{ x, y, payload }`
 4. **URL version path matters** - Must include `/version-live/` or `/version-test/` in the elasticsearch URL
 
-## Important Notes
+## URL Parameters
 
-- This tool is for authorized security testing only
-- Frontend processes tables in parallel batches of 4 for performance
+The frontend accepts these query parameters for testing and automation:
+
+| Parameter | Example | Description |
+|-----------|---------|-------------|
+| `app` | `?app=https://myapp.bubbleapps.io` | Auto-populates URL and triggers scan |
+| `x` | `?x=base64value` | Override default x encryption value |
+| `y` | `?y=base64value` | Override default y encryption value |
+| `user` | `?user=yes` | Enable user mode (shows auth scan section) |
+| `enterprise` | `?enterprise=yes` | Enable enterprise mode (requires credentials) |
+| `version` | `?version=test` | Query test version instead of live (`version-test` or `test`) |
+
+## Implementation Notes
+
+**Performance:**
+- Frontend processes tables in parallel batches of 4
 - Column sensitivity is cached in `state.allColumnSensitivity` to avoid re-analysis
-- Manual overrides take priority over AI classifications
-- Puppeteer uses local Chrome for development, Browserless.io for production/Vercel
-- Page testing supports pagination (20 pages per batch) for Vercel's 60s timeout
+- Page testing uses pagination (20 pages/batch) for Vercel's 60s timeout
+- SSE streaming (`/api/test-pages-stream`) provides real-time feedback during scans
+
+**Data Handling:**
+- Manual overrides in `state.manualColumnOverrides` take priority over AI classifications
+- Logged-out and logged-in data stored separately for comparison views
+- Cookies passed to `mget` when available (all cookies except debug)
+
+**Puppeteer/Browser:**
+- Local Chrome for development (auto-detected from common paths)
+- Browserless.io for production/Vercel (requires `BROWSERLESS_API_KEY`)

@@ -5,6 +5,7 @@ let state = {
   tables: [],
   tablesWithColumns: [],
   tableSensitivity: {},           // Table-level sensitivity (derived from columns)
+  tableDescriptions: {},          // AI-generated table descriptions: { tableId: description }
   allColumnSensitivity: {},       // Column sensitivity for all tables: { tableId: { colName: sensitivity } }
   columnSensitivity: {},          // Sensitivity for current table's columns (active view)
   manualColumnOverrides: {},      // Manual column sensitivity overrides: { tableId: { colName: sensitivity } }
@@ -58,6 +59,8 @@ let state = {
   apiExposureAnalysis: null,      // AI analysis of API exposure risk
   apiExposureLoading: false,      // Loading state for exposure analysis
   pagesLoading: false,            // Loading state for page access testing
+  testPages: [],                  // AI-identified test/development pages
+  testPagesLoading: false,        // Loading state for test page analysis
   riskFilters: {                  // Multi-select risk level filters
     critical: false,
     high: false,
@@ -66,6 +69,10 @@ let state = {
   manualApiOverrides: {},         // Manual API call severity: { "connectorName|callName": { risk, issue } }
   apiKeysSearch: '',              // Search query for API keys tab
   version: 'version-live',        // Bubble version to query (e.g., 'version-live', 'version-test')
+  // Access Audit state
+  accessAuditResults: null,       // { tableId: { userLinkedId, visibleRecordIds, ownedCount, status } }
+  accessAuditLoading: false,      // Loading state for audit
+  accessAuditOwnershipChain: {},  // Extracted ownership chain: { tableName: [ids] }
 };
 
 // Initialize
@@ -175,18 +182,21 @@ async function startScan() {
   showLoading('Identifying app...');
 
   try {
-    // Step 1: Get app ID from meta API
+    // Step 1: Get app ID from app-info API
     updateLoadingText('Fetching app info...');
-    const metaResponse = await fetch(`/api/meta?url=${encodeURIComponent(url)}`);
-    const metaData = await metaResponse.json();
+    const appInfoResponse = await fetch('/api/app-info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const appInfoData = await appInfoResponse.json();
 
-    if (metaData.error) {
-      throw new Error(metaData.error);
+    if (appInfoData.error) {
+      throw new Error(appInfoData.error);
     }
 
-    // Get the app ID from meta response (e.g., "99reviews-43419")
-    // The app ID is in app_data.appname
-    state.appName = (metaData.app_data && metaData.app_data.appname) || extractAppName(url);
+    // Get the app ID from app-info response (e.g., "fundonion2pointoh")
+    state.appName = appInfoData.appId || extractAppName(url);
 
     // Step 2: Get DBML schema to discover tables
     updateLoadingText('Fetching schema...');
@@ -310,11 +320,66 @@ async function analyzeSensitivity() {
     console.log(`Failed to analyze ${state.failedTables.length} tables after retry`);
   }
 
+  // Generate table descriptions for export
+  fetchTableDescriptions();
+
   // Generate AI outreach summary after all analysis is done
   generateOutreachSummary();
 
   // Run endpoint analysis in background (now that we have exposed data)
   analyzeEndpoints();
+}
+
+// Fetch AI-generated descriptions for all tables
+async function fetchTableDescriptions() {
+  try {
+    // Use the appropriate column data based on current view
+    const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+    const columnData = useLoggedIn
+      ? state.loggedInData.allColumnSensitivity
+      : state.allColumnSensitivity;
+
+    // Build table list with their columns for context
+    const tablesForDescriptions = state.tables.map(table => {
+      const columns = Object.keys(columnData[table.id] || {});
+      return {
+        name: table.id,
+        columns: columns
+      };
+    }).filter(t => t.columns.length > 0);
+
+    if (tablesForDescriptions.length === 0) {
+      console.log('No tables with columns to generate descriptions for');
+      return;
+    }
+
+    console.log(`Fetching descriptions for ${tablesForDescriptions.length} tables (${useLoggedIn ? 'logged-in' : 'logged-out'} view)`);
+
+    const response = await fetch('/api/generate-table-descriptions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tables: tablesForDescriptions })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('Table descriptions error:', data.error);
+      return;
+    }
+
+    // Store descriptions
+    state.tableDescriptions = {};
+    if (data.descriptions && Array.isArray(data.descriptions)) {
+      data.descriptions.forEach(item => {
+        state.tableDescriptions[item.table] = item.description;
+      });
+    }
+
+    console.log('Table descriptions loaded:', Object.keys(state.tableDescriptions).length);
+  } catch (error) {
+    console.error('Failed to fetch table descriptions:', error);
+  }
 }
 
 // Analyze a single table's sensitivity (used for parallel processing)
@@ -360,7 +425,15 @@ async function analyzeTableSensitivity(table) {
     let highestSensitivity = 'low';
     const sensitiveFields = [];
 
+    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
+    console.log(`[Batch] ${table.id}: Marking ${columnsWithSamples.length} columns as visible:`, columnsWithSamples.map(c => c.name));
+    columnsWithSamples.forEach(col => {
+      columnSensitivity[col.name] = 'low';
+    });
+
+    // Then override with AI classifications for HIGH/MODERATE fields
     if (data.fields && Array.isArray(data.fields)) {
+      console.log(`[Batch] ${table.id}: AI classified ${data.fields.length} fields:`, data.fields.map(f => `${f.name}:${f.sensitivity}`));
       data.fields.forEach(field => {
         columnSensitivity[field.name] = field.sensitivity;
         sensitiveFields.push(field.name);
@@ -375,6 +448,7 @@ async function analyzeTableSensitivity(table) {
     }
 
     // Store results
+    console.log(`[Batch] ${table.id}: Final columnSensitivity has ${Object.keys(columnSensitivity).length} columns`);
     state.allColumnSensitivity[table.id] = columnSensitivity;
 
     // Derive table sensitivity from column analysis
@@ -1184,7 +1258,29 @@ async function analyzeColumnSensitivity() {
 
   if (columnSensitivityCache[state.selectedTable]) {
     console.log(`Using cached column sensitivity for: ${state.selectedTable} (${useLoggedIn ? 'logged-in' : 'logged-out'})`);
-    state.columnSensitivity = columnSensitivityCache[state.selectedTable];
+    state.columnSensitivity = { ...columnSensitivityCache[state.selectedTable] };
+
+    // Also add any columns from current results that aren't in cache (mark as 'low')
+    const systemFields = ['_version', '_type', '_id'];
+    let addedNewColumns = false;
+    state.results.forEach(row => {
+      Object.keys(row).forEach(key => {
+        if (!systemFields.includes(key) && !(key in state.columnSensitivity)) {
+          state.columnSensitivity[key] = 'low';
+          addedNewColumns = true;
+        }
+      });
+    });
+
+    // Update cache if we found new columns
+    if (addedNewColumns) {
+      if (useLoggedIn) {
+        state.loggedInData.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+      } else {
+        state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+      }
+    }
+
     state.columnSensitivityLoading = false;
     renderResultsTable();
     return;
@@ -1259,6 +1355,13 @@ async function analyzeColumnSensitivity() {
 
     // Store column sensitivity with exact column names
     state.columnSensitivity = {};
+
+    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
+    columnsWithSamples.forEach(col => {
+      state.columnSensitivity[col.name] = 'low';
+    });
+
+    // Then override with AI classifications for HIGH/MODERATE fields
     if (data.fields && Array.isArray(data.fields)) {
       data.fields.forEach(field => {
         state.columnSensitivity[field.name] = field.sensitivity;
@@ -1630,42 +1733,41 @@ async function runAuthenticatedScan() {
     return;
   }
 
-  // Parse cookies (optional in enterprise mode)
+  // Use raw cookies directly (optional in enterprise mode)
   let cookies = '';
   if (rawCookies) {
-    cookies = parseCookieInput(rawCookies);
+    // Just trim and use raw cookie string - no parsing needed
+    cookies = rawCookies.trim();
     if (!cookies && !state.enterpriseMode) {
-      showError('authScanError', 'Could not parse cookies. Please paste the cookie values from DevTools.');
+      showError('authScanError', 'Please paste your session cookies');
       return;
     }
 
-    // Validate required auth cookies (only if cookies were provided)
+    // Validate cookies for current version (don't auto-detect/change version)
+    // Bubble uses different suffixes per app (e.g., 'main', 'd255', etc.)
+    // Pattern: {appname}_u1{suffix} or {appname}_u1_test{suffix} for u1
+    // Pattern: {appname}_{live|test}_u2{suffix} for u2
     if (cookies) {
+      const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
       let hasU1, hasU2, hasSig;
 
-      // Version-aware cookie matching
-      const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
-      console.log('Cookie validation - version:', versionKey);
-      console.log('Cookie validation - cookies length:', cookies.length);
-
       if (versionKey === 'test') {
-        hasU1 = cookies.includes('_u1_testmain=');
-        hasU2 = cookies.includes('_test_u2main=');
-        hasSig = cookies.includes('_test_u2main.sig=');
-        console.log('Test mode - hasU1:', hasU1, 'hasU2:', hasU2, 'hasSig:', hasSig);
+        // Test version: _u1_test{suffix}= and _test_u2{suffix}=
+        hasU1 = /_u1_test[^=]*=/.test(cookies);
+        hasU2 = /_test_u2[^.=]*=/.test(cookies);
+        hasSig = /_test_u2[^=]*\.sig=/.test(cookies);
       } else {
-        hasU1 = cookies.includes('_u1main=');
-        hasU2 = cookies.includes('_live_u2main=');
-        hasSig = cookies.includes('_live_u2main.sig=');
-        console.log('Live mode - hasU1:', hasU1, 'hasU2:', hasU2, 'hasSig:', hasSig);
+        // Live version: _u1{suffix}= (but not _u1_test) and _live_u2{suffix}=
+        // Use negative lookahead to exclude _u1_test patterns
+        hasU1 = /_u1(?!_test)[^=]*=/.test(cookies);
+        hasU2 = /_live_u2[^.=]*=/.test(cookies);
+        hasSig = /_live_u2[^=]*\.sig=/.test(cookies);
       }
 
+      console.log('Cookie validation - version:', versionKey, 'hasU1:', hasU1, 'hasU2:', hasU2, 'hasSig:', hasSig);
+
       if (!hasU1 || !hasU2 || !hasSig) {
-        const missing = [];
-        if (!hasU1) missing.push('{appname}_u1{version}');
-        if (!hasU2) missing.push('{appname}_u2{version}');
-        if (!hasSig) missing.push('{appname}_u2{version}.sig');
-        showError('authScanError', `Missing required cookies: ${missing.join(', ')}`);
+        showError('authScanError', `No ${versionKey} cookies found. Make sure you're logged into the ${versionKey} version of the app.`);
         return;
       }
     }
@@ -1899,6 +2001,12 @@ async function analyzeTableAuthenticated(table) {
     let highestSensitivity = 'low';
     const sensitiveFields = [];
 
+    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
+    columnsWithSamples.forEach(col => {
+      columnSensitivity[col.name] = 'low';
+    });
+
+    // Then override with AI classifications for HIGH/MODERATE fields
     if (data.fields && Array.isArray(data.fields)) {
       data.fields.forEach(field => {
         columnSensitivity[field.name] = field.sensitivity;
@@ -1926,13 +2034,13 @@ async function analyzeTableAuthenticated(table) {
 }
 
 // Fetch table sample with authenticated credentials
-async function fetchTableSampleAuthenticated(tableId) {
+async function fetchTableSampleAuthenticated(tableId, limit = 5) {
   const payload = {
     app_version: state.version.replace('version-', ''),
     appname: state.appName,
     constraints: [],
     from: 0,
-    n: 5,
+    n: limit,
     search_path: '{"constructor_name":"DataSource","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0.%p.%ds"},{"type":"node","value":{"constructor_name":"Element","args":[{"type":"json","value":"%p3.cnEQb0.%el.cnEQh0"}]}},{"type":"raw","value":"Search"}]}',
     situation: 'initial search',
     sorts_list: [],
@@ -2036,6 +2144,324 @@ async function fetchUserProfile(userId) {
     return null;
   }
 }
+
+// ==================== ACCESS AUDIT FUNCTIONS ====================
+
+// Extract ownership chain from user profile - maps IDs to their table types
+function extractOwnershipChain(userProfile) {
+  const userData = userProfile?.body?.docs?.[0]?._source || userProfile?.docs?.[0]?._source;
+  if (!userData) return {};
+
+  const ownership = {};
+
+  // Add user's own _id to 'user' table
+  const userId = userProfile?.body?.docs?.[0]?._id || userProfile?.docs?.[0]?._id;
+  if (userId) {
+    ownership['user'] = [userId];
+  }
+
+  for (const [fieldName, value] of Object.entries(userData)) {
+    if (!value) continue;
+
+    // Skip system fields
+    if (fieldName.startsWith('_')) continue;
+
+    // Parse field name patterns:
+    // {prefix}_list_custom_{tablename} → table: custom.{tablename}
+    // {prefix}_custom_{tablename} → table: custom.{tablename}
+    const listCustomMatch = fieldName.match(/(.+)_list_custom_(.+)/);
+    const singleCustomMatch = fieldName.match(/(.+)_custom_(.+)/);
+
+    let tableName = null;
+
+    if (listCustomMatch) {
+      tableName = `custom.${listCustomMatch[2]}`;
+    } else if (singleCustomMatch) {
+      tableName = `custom.${singleCustomMatch[2]}`;
+    }
+
+    if (tableName) {
+      // Extract IDs from value (could be string ID or array of IDs)
+      let rawIds = Array.isArray(value) ? value : [value];
+      console.log(`[Ownership] Field: ${fieldName}, Table: ${tableName}, Raw value:`, value);
+
+      // Extract IDs - handle Bubble's lookup format: {id}__LOOKUP__{actualId}
+      let ids = [];
+      for (const raw of rawIds) {
+        if (typeof raw !== 'string') continue;
+
+        // Check for __LOOKUP__ format
+        if (raw.includes('__LOOKUP__')) {
+          const parts = raw.split('__LOOKUP__');
+          const actualId = parts[parts.length - 1]; // Get the last part after __LOOKUP__
+          if (/^\d+x\d+$/.test(actualId)) {
+            ids.push(actualId);
+          }
+        } else if (/^\d+x\d+$/.test(raw)) {
+          // Plain ID format
+          ids.push(raw);
+        }
+      }
+      console.log(`[Ownership] Extracted IDs:`, ids);
+
+      if (ids.length > 0) {
+        ownership[tableName] = ownership[tableName] || [];
+        ownership[tableName].push(...ids);
+      }
+    }
+  }
+
+  console.log('[Ownership] Final ownership chain:', ownership);
+  return ownership;
+}
+
+// Main audit orchestrator
+async function runAccessAudit() {
+  if (!state.authUserProfile || !state.hasAuthData) {
+    console.error('Cannot run audit: no authenticated user profile');
+    return;
+  }
+
+  state.accessAuditLoading = true;
+  state.accessAuditResults = {};
+  renderUserSidebar(); // Show loading state in button
+
+  // Step 1: Extract ownership chain from user profile
+  const ownership = extractOwnershipChain(state.authUserProfile);
+  state.accessAuditOwnershipChain = ownership;
+  console.log('Ownership chain:', ownership);
+
+  // Step 2: Get tables with logged-in data
+  const tablesToAudit = Object.entries(state.loggedInData.tableRecordCounts)
+    .filter(([tableId, count]) => count && (count === '400+' || count > 0))
+    .map(([tableId]) => tableId);
+
+  console.log('Tables to audit:', tablesToAudit);
+
+  // Step 3: For each table, fetch records and check ownership
+  const BATCH_SIZE = 4;
+  for (let i = 0; i < tablesToAudit.length; i += BATCH_SIZE) {
+    const batch = tablesToAudit.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(tableId => auditTableAccess(tableId, ownership)));
+  }
+
+  state.accessAuditLoading = false;
+
+  // Show the audit tab and switch to it
+  showAuditTab();
+  switchTab('audit');
+  renderAuditResults();
+  closeUserSidebar();
+}
+
+// Audit a single table's access
+async function auditTableAccess(tableId, ownership) {
+  try {
+    // Convert tableId to ownership key format (user stays as 'user', others become 'custom.{tableId}')
+    const ownershipKey = tableId.toLowerCase() === 'user' ? 'user' : `custom.${tableId}`;
+
+    // Fetch visible records for this table
+    const records = await fetchTableSampleAuthenticated(tableId, 100);
+
+    if (!records || records.length === 0) {
+      state.accessAuditResults[tableId] = {
+        userLinkedIds: ownership[ownershipKey] || [],
+        visibleRecordIds: [],
+        ownedCount: 0,
+        status: 'no_data'
+      };
+      return;
+    }
+
+    // Get IDs user should have access to for this table (direct ownership)
+    const directIds = ownership[ownershipKey] || [];
+    const userId = ownership['user']?.[0];
+
+    // Extract all visible record IDs
+    const visibleRecordIds = records.map(r => r._id).filter(Boolean);
+
+    // Check which records the user should have access to
+    let ownedCount = 0;
+    for (const record of records) {
+      const recordId = record._id;
+      if (!recordId) continue;
+
+      // Check direct ownership
+      if (directIds.includes(recordId)) {
+        ownedCount++;
+        continue;
+      }
+      if (tableId === 'user' && recordId === userId) {
+        ownedCount++;
+        continue;
+      }
+
+      // Check reference fields - look for fields referencing tables the user owns
+      let hasOwnedReference = false;
+      for (const [fieldName, value] of Object.entries(record)) {
+        if (!value || fieldName.startsWith('_')) continue;
+
+        // Parse reference field patterns to get the referenced table
+        const listCustomMatch = fieldName.match(/(.+)_list_custom_(.+)/);
+        const singleCustomMatch = fieldName.match(/(.+)_custom_(.+)/);
+
+        let refTableName = null;
+        if (listCustomMatch) {
+          refTableName = `custom.${listCustomMatch[2]}`;
+        } else if (singleCustomMatch) {
+          refTableName = `custom.${singleCustomMatch[2]}`;
+        }
+
+        if (refTableName && ownership[refTableName]) {
+          // Extract IDs from the reference field value
+          let refIds = Array.isArray(value) ? value : [value];
+          for (const refId of refIds) {
+            if (typeof refId !== 'string') continue;
+            // Handle __LOOKUP__ format
+            let actualId = refId;
+            if (refId.includes('__LOOKUP__')) {
+              actualId = refId.split('__LOOKUP__').pop();
+            }
+            if (ownership[refTableName].includes(actualId)) {
+              hasOwnedReference = true;
+              break;
+            }
+          }
+        }
+        if (hasOwnedReference) break;
+      }
+
+      if (hasOwnedReference) {
+        ownedCount++;
+      }
+    }
+
+    // Determine status
+    let status = 'ok';
+    if (ownedCount === 0 && visibleRecordIds.length > 0) {
+      status = 'unauthorized';
+    } else if (ownedCount < visibleRecordIds.length) {
+      status = 'partial';
+    }
+
+    console.log(`[Audit] ${tableId}: directIds=${directIds.length}, visible=${visibleRecordIds.length}, owned=${ownedCount}, status=${status}`);
+    state.accessAuditResults[tableId] = {
+      userLinkedIds: directIds,
+      visibleRecordIds,
+      ownedCount,
+      status
+    };
+  } catch (error) {
+    console.error(`Audit failed for ${tableId}:`, error);
+    state.accessAuditResults[tableId] = {
+      userLinkedIds: [],
+      visibleRecordIds: [],
+      ownedCount: 0,
+      status: 'error'
+    };
+  }
+}
+
+// Dynamically add the Audit tab when audit runs
+function showAuditTab() {
+  const tabNav = document.querySelector('.tab-nav');
+  if (!tabNav) return;
+
+  // Check if audit tab already exists
+  if (document.querySelector('[data-tab="audit"]')) return;
+
+  // Insert audit tab button before the filter container
+  const filterContainer = document.getElementById('tabFilterContainer');
+  const auditBtn = document.createElement('button');
+  auditBtn.className = 'tab-btn';
+  auditBtn.dataset.tab = 'audit';
+  auditBtn.onclick = () => switchTab('audit');
+  auditBtn.textContent = 'Audit';
+
+  if (filterContainer) {
+    tabNav.insertBefore(auditBtn, filterContainer);
+  } else {
+    tabNav.appendChild(auditBtn);
+  }
+}
+
+// Render audit results in the audit panel
+function renderAuditResults() {
+  const container = document.getElementById('auditList');
+  if (!container) return;
+
+  if (!state.accessAuditResults || Object.keys(state.accessAuditResults).length === 0) {
+    container.innerHTML = '<div class="audit-empty">No audit results available. Run an access audit from the user profile sidebar.</div>';
+    return;
+  }
+
+  const rows = Object.entries(state.accessAuditResults)
+    .map(([tableId, result]) => {
+      const statusClass = getAuditStatusClass(result.status);
+      const statusLabel = getAuditStatusLabel(result);
+      const visibleCount = result.visibleRecordIds?.length || 0;
+      const visibleIdsTooltip = result.visibleRecordIds?.join('\n') || 'None';
+      const linkedIds = result.userLinkedIds || [];
+      const linkedCount = linkedIds.length;
+      const linkedIdsTooltip = linkedIds.join('\n') || 'No linked IDs';
+
+      return `
+        <tr class="audit-row ${statusClass}">
+          <td class="audit-table-name">${escapeHtml(formatFieldName(tableId))}</td>
+          <td class="audit-linked-id" title="${escapeHtml(linkedIdsTooltip)}">
+            <span class="hover-tooltip">${linkedCount} linked</span>
+          </td>
+          <td class="audit-visible-count" title="${escapeHtml(visibleIdsTooltip)}">
+            <span class="hover-tooltip">${visibleCount} visible</span>
+          </td>
+          <td class="audit-status">
+            <span class="audit-status-badge ${statusClass}">${statusLabel}</span>
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  container.innerHTML = `
+    <table class="audit-table">
+      <thead>
+        <tr>
+          <th>Table Name</th>
+          <th>User's Linked IDs</th>
+          <th>Visible Records</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
+  `;
+}
+
+function getAuditStatusClass(status) {
+  switch (status) {
+    case 'unauthorized': return 'status-critical';
+    case 'partial': return 'status-warning';
+    case 'ok': return 'status-ok';
+    case 'error': return 'status-error';
+    default: return 'status-neutral';
+  }
+}
+
+function getAuditStatusLabel(result) {
+  const extra = result.visibleRecordIds?.length - result.ownedCount;
+  switch (result.status) {
+    case 'unauthorized': return `Can see ${result.visibleRecordIds?.length || 0} extra`;
+    case 'partial': return `Can see ${extra} extra`;
+    case 'ok': return 'OK';
+    case 'no_data': return 'No Data';
+    case 'error': return 'Error';
+    default: return 'Unknown';
+  }
+}
+
+// ==================== END ACCESS AUDIT FUNCTIONS ====================
 
 // Toggle user profile sidebar
 function toggleUserProfilePopover(event) {
@@ -2179,6 +2605,23 @@ function renderUserSidebar() {
     if (state.authUserId) {
       fetchUserProfile(state.authUserId).then(() => renderUserSidebar());
     }
+  }
+
+  // Add audit button if authenticated data is available
+  if (state.hasAuthData && state.authUserProfile) {
+    html += `
+      <div class="sidebar-section sidebar-audit-section">
+        <button
+          class="btn-primary sidebar-audit-btn"
+          onclick="runAccessAudit()"
+          ${state.accessAuditLoading ? 'disabled' : ''}
+        >
+          ${state.accessAuditLoading ?
+            '<span class="spinner-small"></span> Running Audit...' :
+            'Run Access Audit'}
+        </button>
+      </div>
+    `;
   }
 
   container.innerHTML = html;
@@ -2454,39 +2897,42 @@ function closeAuthModal() {
 }
 
 // Extract user ID from cookies based on version (test or live)
+// Bubble uses different suffixes per app (e.g., 'main', 'd255', etc.)
 function extractUserIdFromCookies(cookies) {
   if (!cookies) return null;
 
   const versionKey = state.version.replace('version-', ''); // 'test' or 'live'
   console.log('Extracting user ID for version:', versionKey);
 
-  // For test version: look for _u1_testmain cookie
-  // For live version: look for _u1main cookie (not _u1_testmain)
+  // For test version: look for _u1_test{suffix} cookie
+  // For live version: look for _u1{suffix} cookie (not _u1_test)
   if (versionKey === 'test') {
-    const u1TestMatch = cookies.match(/(?:^|;\s*)([^;]*_u1_testmain)=([^;]+)/);
+    // Match _u1_test followed by any suffix until =
+    const u1TestMatch = cookies.match(/(?:^|;\s*)([^;]*_u1_test[^=]*)=([^;]+)/);
     if (u1TestMatch) {
       const userId = u1TestMatch[2].trim();
-      console.log('Extracted user ID from _u1_testmain:', userId);
+      console.log('Extracted user ID from u1_test cookie:', userId);
       return userId;
     }
   } else {
-    const u1MainMatch = cookies.match(/(?:^|;\s*)([^;]*_u1main)=([^;]+)/);
-    if (u1MainMatch && !u1MainMatch[1].includes('_test')) {
+    // Match _u1 followed by any suffix (but not _u1_test)
+    const u1MainMatch = cookies.match(/(?:^|;\s*)([^;]*_u1(?!_test)[^=]*)=([^;]+)/);
+    if (u1MainMatch) {
       const userId = u1MainMatch[2].trim();
-      console.log('Extracted user ID from _u1main:', userId);
+      console.log('Extracted user ID from u1 cookie:', userId);
       return userId;
     }
   }
 
-  // Fallback: try to extract from _test_u2main or _live_u2main cookie based on version
-  // Format: {appname}_{version}_u2main=bus|<user_id>|<session_id>
-  const u2Pattern = new RegExp(`(?:^|;\\s*)([^;]*_${versionKey}_u2main)=([^;]+)`);
+  // Fallback: try to extract from _{version}_u2{suffix} cookie
+  // Format: {appname}_{version}_u2{suffix}=bus|<user_id>|<session_id>
+  const u2Pattern = new RegExp(`(?:^|;\\s*)([^;]*_${versionKey}_u2[^.=]*)=([^;]+)`);
   const u2MainMatch = cookies.match(u2Pattern);
   if (u2MainMatch) {
     const value = u2MainMatch[2].trim();
     const parts = value.split('|');
     if (parts.length >= 2 && parts[1].includes('x')) {
-      console.log(`Extracted user ID from _${versionKey}_u2main:`, parts[1]);
+      console.log(`Extracted user ID from ${versionKey}_u2 cookie:`, parts[1]);
       return parts[1];
     }
   }
@@ -2584,12 +3030,13 @@ function parseCookieInput(input) {
     }
   }
 
-  // Sort: u1main first, then live_u2main, then .sig
+  // Sort: u1 cookies first, then live_u2 cookies, then .sig
+  // Bubble uses different suffixes per app (e.g., 'main', 'd255', etc.)
   parsedCookies.sort((a, b) => {
     const order = (s) => {
-      if (s.match(/_u1main=/)) return 0;
-      if (s.includes('_live_u2main=') && !s.includes('.sig')) return 1;
-      if (s.includes('_live_u2main.sig=')) return 2;
+      if (/_u1[^=]*=/.test(s)) return 0;
+      if (/_live_u2[^.=]*=/.test(s) && !s.includes('.sig')) return 1;
+      if (/_live_u2[^=]*\.sig=/.test(s)) return 2;
       return 3;
     };
     return order(a) - order(b);
@@ -2792,6 +3239,7 @@ function switchTab(tabName) {
   document.getElementById('endpointsPanel').classList.toggle('hidden', tabName !== 'endpoints');
   document.getElementById('keysPanel').classList.toggle('hidden', tabName !== 'keys');
   document.getElementById('pagesPanel').classList.toggle('hidden', tabName !== 'pages');
+  document.getElementById('auditPanel')?.classList.toggle('hidden', tabName !== 'audit');
 
   // Render appropriate filter toggle
   renderTabFilter();
@@ -3084,6 +3532,12 @@ function renderEndpointsList() {
 
   let html = '';
 
+  // Add header with export button
+  html += `<div class="endpoints-header">
+    <h3 class="section-title">Workflow APIs <span class="count-badge">${workflows.length}</span></h3>
+    <button class="export-csv-btn" onclick="exportEndpointsCSV()" title="Export to CSV">Export CSV</button>
+  </div>`;
+
   if (filteredWorkflows.length === 0) {
     html += `<div class="endpoints-empty"><p>No sensitive endpoints found.</p></div>`;
   } else {
@@ -3285,6 +3739,11 @@ async function testPageAccess(url, pageNames, editorUrl, offset = 0) {
     const total = data.totalPages || tested;
     console.log(`[Pages] Test complete: ${tested}/${total} pages tested, ${accessible} accessible in this batch`);
 
+    // Trigger test page analysis on first batch
+    if (offset === 0 && state.apiKeysAnalysis?.pageNames?.length > 0) {
+      analyzeTestPages(state.apiKeysAnalysis.pageNames);
+    }
+
   } catch (error) {
     console.error('Page access test failed:', error);
     state.pagesLoading = false;
@@ -3314,6 +3773,39 @@ async function scanMorePages() {
   await testPageAccess(url, pageNames, editorUrl, offset);
 
   // Button state is updated by renderPagesList
+}
+
+// AI analysis to identify test/development pages
+async function analyzeTestPages(pageNames) {
+  if (!pageNames || pageNames.length === 0) return;
+
+  state.testPagesLoading = true;
+  console.log(`[Test Pages AI] Analyzing ${pageNames.length} pages...`);
+
+  try {
+    const response = await fetch('/api/analyze-test-pages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pages: pageNames })
+    });
+
+    const data = await response.json();
+
+    if (data.error) {
+      console.error('[Test Pages AI] Error:', data.error);
+      return;
+    }
+
+    state.testPages = data.testPages || [];
+    console.log(`[Test Pages AI] Found ${state.testPages.length} test pages:`, state.testPages);
+
+    // Re-render pages list to show test page indicators
+    renderPagesList();
+  } catch (error) {
+    console.error('[Test Pages AI] Failed:', error);
+  } finally {
+    state.testPagesLoading = false;
+  }
 }
 
 // Render the API keys list from extracted page data
@@ -3484,25 +3976,30 @@ function renderPagesList() {
       </div>
       <div class="pages-grid" id="pagesGrid">
         ${pageAccess.map(result => {
+          const isTestPage = (state.testPages || []).includes(result.page);
+          const testBadge = isTestPage ? '<span class="test-page-badge" title="Test/dev page detected by AI">&#9888;</span>' : '';
           if (result.error) {
             return `
-              <div class="page-card error" data-page="${result.page}">
+              <div class="page-card error${isTestPage ? ' test-page' : ''}" data-page="${result.page}">
                 <span class="page-icon">&#9888;</span>
                 <span class="page-name">${result.page}</span>
+                ${testBadge}
               </div>
             `;
           } else if (result.accessible) {
             return `
-              <div class="page-card public" data-page="${result.page}">
+              <div class="page-card public${isTestPage ? ' test-page' : ''}" data-page="${result.page}">
+                ${testBadge}
                 <span class="page-name">${result.page}</span>
                 <a href="${result.requestedUrl}" target="_blank" class="page-link" title="Open page">&#8599;</a>
               </div>
             `;
           } else {
             return `
-              <div class="page-card protected" data-page="${result.page}">
+              <div class="page-card protected${isTestPage ? ' test-page' : ''}" data-page="${result.page}">
                 <span class="page-icon">&#128274;</span>
                 <span class="page-name">${result.page}</span>
+                ${testBadge}
                 <span class="page-redirect">&#8594; ${result.redirectTarget || 'login'}</span>
               </div>
             `;
@@ -4752,3 +5249,215 @@ window.debugCompare = async function(tableType = 'user') {
     console.error('Debug compare failed:', error);
   }
 }
+
+// Hidden function to export database schema as CSV
+// Trigger via console: exportSchemaCSV() or keyboard shortcut Ctrl+Shift+E
+// Format: One row per column - Table | Description | Classification | Record Count | Column | Column Classification | Visible
+// Each role should be exported to a separate tab/sheet
+window.exportSchemaCSV = async function(roleName) {
+  if (!state.tables || state.tables.length === 0) {
+    console.error('No tables loaded. Run a scan first.');
+    return;
+  }
+
+  // Prompt for role name if not provided
+  if (!roleName) {
+    roleName = prompt('Enter role name for this export (e.g., "Logged Out", "Admin", "Client"):',
+      state.currentView === 'logged-in' ? 'Logged In User' : 'Logged Out');
+    if (!roleName) {
+      console.log('Export cancelled');
+      return;
+    }
+  }
+
+  const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+  const sensitivityData = useLoggedIn ? state.loggedInData.tableSensitivity : state.tableSensitivity;
+  const columnSensitivityData = useLoggedIn
+    ? state.loggedInData.allColumnSensitivity
+    : state.allColumnSensitivity;
+  const recordCountData = useLoggedIn
+    ? state.loggedInData.tableRecordCounts
+    : state.loggedOutData.tableRecordCounts;
+
+  console.log(`Starting CSV export for role: ${roleName}...`);
+
+  // Check if we have table descriptions for the tables with data in current view
+  const tablesWithData = state.tables.filter(t => {
+    const cols = columnSensitivityData?.[t.id];
+    return cols && Object.keys(cols).length > 0;
+  });
+  const missingDescriptions = tablesWithData.filter(t => !state.tableDescriptions?.[t.id]);
+
+  if (missingDescriptions.length > 0) {
+    console.log(`Fetching descriptions for ${missingDescriptions.length} tables missing descriptions...`);
+    await fetchTableDescriptions();
+  }
+  console.log('Table descriptions available:', Object.keys(state.tableDescriptions || {}).length);
+  console.log('Descriptions:', state.tableDescriptions);
+
+  // Build CSV rows - grouped by table
+  // Table metadata only on first row, then blank for subsequent columns (for Excel cell merging)
+  const header = ['Table', 'Description', 'Table Classification', 'Record Count', 'Column', 'Column Classification', 'Visible'];
+  const rows = [header];
+
+  for (const table of state.tables) {
+    const tableId = table.id;
+    const tableColumns = columnSensitivityData?.[tableId] || {};
+    const columnNames = Object.keys(tableColumns);
+
+    const recordCount = recordCountData?.[tableId] ?? table.recordCount ?? 0;
+    const tableSensitivity = sensitivityData?.[tableId];
+    const description = state.tableDescriptions?.[tableId] || '';
+    const tableClassification = tableSensitivity?.sensitivity || 'low';
+
+    if (columnNames.length > 0) {
+      const sortedColumns = columnNames.sort();
+
+      // First column row includes table metadata
+      rows.push([
+        tableId,
+        description,
+        tableClassification,
+        recordCount,
+        sortedColumns[0],
+        tableColumns[sortedColumns[0]] || 'low',
+        'Yes'
+      ]);
+
+      // Subsequent column rows have empty table metadata (for merging in Excel)
+      for (let i = 1; i < sortedColumns.length; i++) {
+        const colName = sortedColumns[i];
+        rows.push([
+          '',  // Empty for cell merging
+          '',
+          '',
+          '',
+          colName,
+          tableColumns[colName] || 'low',
+          'Yes'
+        ]);
+      }
+    } else {
+      // Table has no visible columns
+      rows.push([
+        tableId,
+        description,
+        tableClassification,
+        recordCount,
+        '(no columns)',
+        '',
+        'No'
+      ]);
+    }
+
+    console.log(`${tableId}: ${columnNames.length} columns`);
+  }
+
+  // Convert to CSV
+  const csv = rows.map(row => row.map(cell => {
+    const str = String(cell ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }).join(',')).join('\n');
+
+  // Download with role name in filename
+  const safeRoleName = roleName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${state.appName || 'schema'}_${safeRoleName}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  console.log(`Exported ${rows.length - 1} rows to CSV (role: ${roleName})`);
+};
+
+// Keyboard shortcut: Ctrl+Shift+E to export schema
+document.addEventListener('keydown', function(e) {
+  if (e.ctrlKey && e.shiftKey && e.key === 'E') {
+    e.preventDefault();
+    window.exportSchemaCSV();
+  }
+  // Ctrl+Shift+A to export API endpoints
+  if (e.ctrlKey && e.shiftKey && e.key === 'A') {
+    e.preventDefault();
+    window.exportEndpointsCSV();
+  }
+});
+
+// Hidden function to export API endpoints as CSV
+// Trigger via console: exportEndpointsCSV() or keyboard shortcut Ctrl+Shift+A
+window.exportEndpointsCSV = function() {
+  if (!state.endpointAnalysis || !state.endpointAnalysis.workflows) {
+    console.error('No endpoint data loaded. Run a scan first and check the Endpoints tab.');
+    return;
+  }
+
+  const { workflows } = state.endpointAnalysis;
+
+  if (workflows.length === 0) {
+    console.error('No workflows found.');
+    return;
+  }
+
+  console.log(`Exporting ${workflows.length} endpoints...`);
+
+  // Build CSV rows
+  const header = ['Endpoint', 'Auth Level', 'Auth Required', 'Is Callable', 'Risk Level', 'Required Params', 'Optional Params', 'All Parameters'];
+  const rows = [header];
+
+  for (const workflow of workflows) {
+    const authLevel = workflow.authLevel || (workflow.authRequired ? 'user' : 'none');
+    const requiredParams = workflow.parameters.filter(p => p.required).map(p => p.name).join(', ');
+    const optionalParams = workflow.parameters.filter(p => !p.required).map(p => p.name).join(', ');
+    const allParams = workflow.parameters.map(p => `${p.name}${p.required ? '*' : ''}`).join(', ');
+
+    // Determine risk level
+    let riskLevel = 'low';
+    if (authLevel === 'none') {
+      riskLevel = workflow.isCallable ? 'critical' : 'high';
+    } else if (authLevel === 'user') {
+      riskLevel = workflow.isCallable ? 'high' : 'medium';
+    } else if (authLevel === 'admin') {
+      riskLevel = 'low';
+    }
+
+    rows.push([
+      `/api/1.1/wf/${workflow.name}`,
+      authLevel,
+      workflow.authRequired ? 'Yes' : 'No',
+      workflow.isCallable ? 'Yes' : 'No',
+      riskLevel,
+      requiredParams,
+      optionalParams,
+      allParams
+    ]);
+  }
+
+  // Convert to CSV
+  const csv = rows.map(row => row.map(cell => {
+    const str = String(cell ?? '');
+    if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+      return '"' + str.replace(/"/g, '""') + '"';
+    }
+    return str;
+  }).join(',')).join('\n');
+
+  // Download
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${state.appName || 'app'}_endpoints.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  console.log(`Exported ${rows.length - 1} endpoints to CSV`);
+};

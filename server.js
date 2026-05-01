@@ -6,9 +6,6 @@ import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import puppeteer from 'puppeteer-core';
 
-// Browserless.io API key for serverless environments
-const BROWSERLESS_API_KEY = process.env.BROWSERLESS_API_KEY;
-
 import fs from 'fs';
 function findLocalChrome() {
   const paths = [
@@ -28,6 +25,11 @@ function findLocalChrome() {
 
 dotenv.config();
 
+// Environment variables (after dotenv.config)
+const BROWSERLESS_API_KEY = process.env.BROWSERLESS_API_KEY;
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
+
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
@@ -41,28 +43,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(join(__dirname, 'public')));
-
-// Proxy endpoint for Bubble meta API
-app.get('/api/meta', async (req, res) => {
-  const { url } = req.query;
-
-  if (!url) {
-    return res.status(400).json({ error: 'URL parameter is required' });
-  }
-
-  try {
-    const baseUrl = new URL(url).origin;
-    const metaUrl = `${baseUrl}/api/1.1/meta`;
-
-    const response = await fetch(metaUrl);
-    const data = await response.json();
-
-    res.json(data);
-  } catch (error) {
-    console.error('Meta API error:', error);
-    res.status(500).json({ error: 'Failed to fetch meta data', details: error.message });
-  }
-});
 
 // Proxy endpoint for DBML schema
 app.get('/api/schema', async (req, res) => {
@@ -333,6 +313,70 @@ Only include HIGH or MODERATE columns. Omit LOW sensitivity columns entirely.`
   } catch (error) {
     console.error('Column analysis error:', error);
     res.status(500).json({ error: 'Failed to analyze columns', details: error.message });
+  }
+});
+
+// Endpoint for generating AI table descriptions
+app.post('/api/generate-table-descriptions', async (req, res) => {
+  console.log('Table descriptions endpoint called');
+  const { tables } = req.body;
+
+  if (!tables || !Array.isArray(tables) || tables.length === 0) {
+    return res.status(400).json({ error: 'tables array is required' });
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: 'Anthropic API key not configured' });
+  }
+
+  console.log(`Generating descriptions for ${tables.length} tables`);
+
+  try {
+    // Format tables with their columns for Claude
+    const tableDetails = tables.map(t => {
+      const cols = t.columns && t.columns.length > 0
+        ? t.columns.slice(0, 15).join(', ') + (t.columns.length > 15 ? '...' : '')
+        : '(no columns)';
+      return `- ${t.name}: ${cols}`;
+    }).join('\n');
+
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      messages: [
+        {
+          role: 'user',
+          content: `You are a data analyst. For each database table below, write a brief 5-10 word description of what data it likely contains based on its name and columns.
+
+Tables:
+${tableDetails}
+
+Respond with valid JSON only:
+{
+  "descriptions": [
+    { "table": "exact_table_name", "description": "Brief description of table contents" }
+  ]
+}
+
+Keep descriptions concise and factual. Focus on what type of data/records the table stores.`
+        }
+      ]
+    });
+
+    const responseText = message.content[0].text;
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1];
+    }
+
+    const result = JSON.parse(jsonStr.trim());
+    console.log('Table descriptions generated:', result.descriptions?.length || 0);
+
+    res.json(result);
+  } catch (error) {
+    console.error('Table descriptions error:', error);
+    res.status(500).json({ error: 'Failed to generate descriptions', details: error.message });
   }
 });
 
@@ -702,6 +746,179 @@ app.post('/api/aggregate-count-auth', async (req, res) => {
   }
 });
 
+// Endpoint for aggregate count with constraints (for audit feature)
+app.post('/api/aggregate-count-constrained', async (req, res) => {
+  const { x, y, appName, appUrl, tableType, cookies, version, constraints } = req.body;
+
+  if (!x || !y || !appName || !appUrl || !tableType) {
+    return res.status(400).json({ error: 'x, y, appName, appUrl, and tableType are required' });
+  }
+
+  const versionValue = version ? version.replace('version-', '') : 'live';
+
+  try {
+    // Step 1: Call aggregate API to get z (with constraints)
+    const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
+
+    const aggregatePayload = {
+      x,
+      y,
+      appname: appName,
+      type: tableType,
+      app_version: versionValue,
+    };
+
+    // Add constraints if provided
+    if (constraints && Array.isArray(constraints) && constraints.length > 0) {
+      aggregatePayload.constraints = constraints;
+    }
+
+    console.log(`[Aggregate-Constrained] ${tableType}: payload:`, JSON.stringify(aggregatePayload));
+
+    const aggregateResponse = await fetch(aggregateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aggregatePayload),
+    });
+
+    const aggregateData = await aggregateResponse.json();
+
+    if (!aggregateData.z) {
+      console.log(`[Aggregate-Constrained] ${tableType}: No z returned from Step 1`);
+      return res.json({ count: 0, error: 'Failed to get aggregate params' });
+    }
+
+    // Step 2: Call aggregate-worker with user's x, y, z, url, and cookies
+    const appUrlObj = new URL(appUrl);
+    const versionPath = version || 'version-live';
+    const maggregateUrl = `${appUrlObj.origin}/${versionPath}/elasticsearch/maggregate`;
+
+    const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x,
+        y,
+        z: aggregateData.z,
+        url: maggregateUrl,
+        ...(cookies && { cookies }),
+      }),
+    });
+
+    const workerData = await workerResponse.json();
+
+    // Extract count from response
+    const count = workerData.count ||
+                  workerData.body?.responses?.[0]?.count ||
+                  workerData.body?.aggregations?.agg?.value ||
+                  0;
+
+    console.log(`[Aggregate-Constrained] ${tableType}: count=${count}`);
+
+    res.json({ count, authenticated: workerData.authenticated });
+  } catch (error) {
+    console.error('Aggregate count constrained error:', error);
+    res.status(500).json({ error: 'Failed to get constrained count', details: error.message });
+  }
+});
+
+// TEST ENDPOINT: Column-level distinct count via aggregate API
+app.post('/api/aggregate-column-distinct', async (req, res) => {
+  const { x, y, appName, appUrl, tableType, field, cookies, version } = req.body;
+
+  if (!x || !y || !appName || !tableType || !field) {
+    return res.status(400).json({ error: 'x, y, appName, tableType, and field are required' });
+  }
+
+  const versionValue = version ? version.replace('version-', '') : 'live';
+
+  try {
+    // Step 1: Call aggregate API with field parameter for cardinality
+    const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
+
+    // Try different payload variations based on query param
+    const { variation = 'field_only' } = req.body;
+
+    let aggregatePayload = {
+      x,
+      y,
+      appname: appName,
+      type: tableType,
+      app_version: versionValue,
+    };
+
+    // Test different ways to request field-level aggregation
+    if (variation === 'field_only') {
+      aggregatePayload.field = field;
+    } else if (variation === 'with_agg_type') {
+      aggregatePayload.field = field;
+      aggregatePayload.agg_type = 'cardinality';
+    } else if (variation === 'aggregation') {
+      aggregatePayload.aggregation = { field, type: 'cardinality' };
+    } else if (variation === 'aggs') {
+      aggregatePayload.aggs = { distinct_count: { cardinality: { field } } };
+    }
+
+    console.log(`[Aggregate-Column] ${tableType}.${field}: payload:`, JSON.stringify(aggregatePayload));
+
+    const aggregateResponse = await fetch(aggregateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aggregatePayload),
+    });
+
+    const aggregateData = await aggregateResponse.json();
+    console.log(`[Aggregate-Column] ${tableType}.${field}: Step 1 response:`, JSON.stringify(aggregateData));
+
+    if (!aggregateData.z) {
+      return res.json({
+        distinctCount: null,
+        error: 'No z returned - field parameter may not be supported',
+        step1Response: aggregateData
+      });
+    }
+
+    // Step 2: Call aggregate-worker
+    const appUrlObj = appUrl ? new URL(appUrl) : null;
+    const versionPath = version || 'version-live';
+    const maggregateUrl = appUrlObj
+      ? `${appUrlObj.origin}/${versionPath}/elasticsearch/maggregate`
+      : `https://99reviews.io/${versionPath}/elasticsearch/maggregate`;
+
+    const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: aggregateData.x || x,
+        y: aggregateData.y || y,
+        z: aggregateData.z,
+        url: maggregateUrl,
+        ...(cookies && { cookies }),
+      }),
+    });
+
+    const workerData = await workerResponse.json();
+    console.log(`[Aggregate-Column] ${tableType}.${field}: Worker response:`, JSON.stringify(workerData));
+
+    // Extract cardinality/distinct count from response
+    const distinctCount = workerData.count ||
+                          workerData.body?.responses?.[0]?.aggregations?.agg?.value ||
+                          workerData.body?.aggregations?.agg?.value ||
+                          workerData.body?.aggregations?.cardinality?.value ||
+                          null;
+
+    res.json({
+      distinctCount,
+      field,
+      tableType,
+      rawResponse: workerData
+    });
+  } catch (error) {
+    console.error('Aggregate column distinct error:', error);
+    res.status(500).json({ error: 'Failed to get column distinct count', details: error.message });
+  }
+});
+
 // Endpoint to fetch user profile by ID via mget worker
 app.post('/api/mget', async (req, res) => {
   const { x, y, appName, appUrl, ids, version, cookies } = req.body;
@@ -845,6 +1062,238 @@ app.post('/api/app-plan', async (req, res) => {
   }
 });
 
+// Get admin email from Bubble app
+async function getAdminEmail(url) {
+  let browser = null;
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      throw new Error('No browser available');
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    // Wait for Bubble's appquery object
+    try {
+      await page.waitForFunction(() => window.appquery && window.appquery.custom_domain_admin_email, { timeout: 15000 });
+    } catch (e) {
+      // Give it a bit more time then continue
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    // Extract the admin email
+    const adminEmail = await page.evaluate(() => {
+      try {
+        if (window.appquery) {
+          if (typeof window.appquery.custom_domain_admin_email === 'function') {
+            return window.appquery.custom_domain_admin_email();
+          } else if (window.appquery.custom_domain_admin_email) {
+            return window.appquery.custom_domain_admin_email;
+          }
+        }
+      } catch (e) {}
+      return null;
+    });
+
+    await browser.close();
+    return adminEmail;
+
+  } catch (error) {
+    if (browser) await browser.close();
+    throw error;
+  }
+}
+
+// API endpoint to get the Bubble app admin email
+app.post('/api/admin-email', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  console.log(`[Admin Email] Fetching admin email for: ${url}`);
+
+  try {
+    const adminEmail = await getAdminEmail(url);
+
+    if (adminEmail) {
+      console.log(`[Admin Email] Found: ${adminEmail}`);
+      res.json({ adminEmail, url });
+    } else {
+      console.log(`[Admin Email] Not found`);
+      res.json({ adminEmail: null, url, message: 'Admin email not found' });
+    }
+  } catch (error) {
+    console.error(`[Admin Email] Error:`, error.message);
+    res.status(500).json({ error: 'Failed to fetch admin email', details: error.message });
+  }
+});
+
+// Get app ID and favicon from Bubble app
+async function getAppInfo(url) {
+  let browser = null;
+  try {
+    const isVercel = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const localChrome = findLocalChrome();
+
+    if (localChrome && !isVercel) {
+      browser = await puppeteer.launch({
+        executablePath: localChrome,
+        headless: 'new',
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      });
+    } else if (BROWSERLESS_API_KEY) {
+      browser = await puppeteer.connect({
+        browserWSEndpoint: `wss://chrome.browserless.io?token=${BROWSERLESS_API_KEY}`,
+      });
+    } else {
+      throw new Error('No browser available');
+    }
+
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    // Wait for Bubble's appquery object
+    try {
+      await page.waitForFunction(() => window.appquery, { timeout: 15000 });
+    } catch (e) {
+      // Give it a bit more time then continue
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    // Extract app ID and favicon
+    const appInfo = await page.evaluate(() => {
+      try {
+        if (window.appquery) {
+          const appId = typeof window.appquery.id === 'function'
+            ? window.appquery.id()
+            : window.appquery.id;
+          const favicon = typeof window.appquery.favicon === 'function'
+            ? window.appquery.favicon()
+            : window.appquery.favicon;
+          // Return null if appId is "meta" (invalid result)
+          if (appId === 'meta') {
+            return { appId: null, favicon: null };
+          }
+          return { appId: appId || null, favicon: favicon || null };
+        }
+      } catch (e) {}
+      return { appId: null, favicon: null };
+    });
+
+    await browser.close();
+    return appInfo;
+
+  } catch (error) {
+    if (browser) await browser.close();
+    throw error;
+  }
+}
+
+// API endpoint to get Bubble app ID and favicon
+app.post('/api/app-info', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  console.log(`[App Info] Fetching app info for: ${url}`);
+
+  try {
+    const appInfo = await getAppInfo(url);
+
+    if (appInfo.appId || appInfo.favicon) {
+      console.log(`[App Info] Found - ID: ${appInfo.appId}, Favicon: ${appInfo.favicon ? 'yes' : 'no'}`);
+      res.json({ ...appInfo, url });
+    } else {
+      console.log(`[App Info] Not found`);
+      res.json({ appId: null, favicon: null, url, message: 'App info not found' });
+    }
+  } catch (error) {
+    console.error(`[App Info] Error:`, error.message);
+    res.status(500).json({ error: 'Failed to fetch app info', details: error.message });
+  }
+});
+
+// API endpoint to extract contact info (email, LinkedIn) using Cloudflare Browser Rendering
+app.post('/api/extract-contact', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_API_TOKEN) {
+    return res.status(500).json({ error: 'Cloudflare credentials not configured' });
+  }
+
+  console.log(`[Extract Contact] Fetching contact info for: ${url}`);
+
+  try {
+    const cfUrl = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/browser-rendering/json`;
+
+    const response = await fetch(cfUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url,
+        prompt: 'Extract the contact email address and LinkedIn profile URL from this page. Look for email addresses in mailto: links, contact sections, footers, and team pages. Look for LinkedIn URLs linking to company or person profiles.',
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'contact_info',
+            schema: {
+              type: 'object',
+              properties: {
+                email: { type: 'string', description: 'Contact email address' },
+                linkedin: { type: 'string', description: 'LinkedIn profile or company page URL' }
+              }
+            }
+          }
+        },
+        gotoOptions: {
+          waitUntil: 'networkidle0',
+          timeout: 45000
+        },
+        waitForTimeout: 5000
+      }),
+    });
+
+    const data = await response.json();
+    console.log(`[Extract Contact] Raw Cloudflare response:`, JSON.stringify(data, null, 2));
+
+    if (!data.success) {
+      console.error(`[Extract Contact] Cloudflare error:`, data.errors);
+      return res.status(500).json({ error: 'Cloudflare API error', details: data.errors });
+    }
+
+    console.log(`[Extract Contact] Found:`, data.result);
+    res.json({ ...data.result, url });
+
+  } catch (error) {
+    console.error(`[Extract Contact] Error:`, error.message);
+    res.status(500).json({ error: 'Failed to extract contact info', details: error.message });
+  }
+});
+
 // API endpoint to extract session cookies from a Bubble app
 app.post('/api/extract-cookies', async (req, res) => {
   const { url } = req.body;
@@ -929,7 +1378,8 @@ app.post('/api/extract-cookies', async (req, res) => {
       appName = metaData.app_data?.appname;
     } catch (e) {
       // Fallback: detect app name from cookie names
-      const bubbleCookie = allCookies.find(c => c.name.includes('_u1main') || c.name.includes('_u2main'));
+      // Match any _u1 or _u2 pattern (Bubble uses various suffixes like 'main', 'd255', etc.)
+      const bubbleCookie = allCookies.find(c => /_u1/.test(c.name) || /_u2/.test(c.name));
       if (bubbleCookie) {
         appName = bubbleCookie.name.split('_')[0];
       }
@@ -940,11 +1390,14 @@ app.post('/api/extract-cookies', async (req, res) => {
       ? allCookies.filter(c => c.name.startsWith(appName))
       : allCookies;
 
-    // Sort cookies: u1main first, then u2main, then u2main.sig
+    // Sort cookies: u1 cookies first, then u2 cookies, then u2.sig
+    // Bubble uses different suffixes per app (e.g., 'main', 'd255', etc.)
     const sortedCookies = appCookies.sort((a, b) => {
       const order = (name) => {
-        if (name.includes('_u1main') || name.includes('_u1_')) return 0;
-        if (name.includes('_u2main') && !name.includes('.sig')) return 1;
+        // Match _u1{suffix} or _u1_test{suffix} patterns
+        if (/_u1[^.]*$/.test(name) || /_u1_/.test(name)) return 0;
+        // Match _u2{suffix} but not .sig
+        if (/_u2/.test(name) && !name.includes('.sig')) return 1;
         if (name.includes('.sig')) return 2;
         return 3;
       };
@@ -957,10 +1410,10 @@ app.post('/api/extract-cookies', async (req, res) => {
       .join('; ');
 
     // Also return structured data for debugging/display
+    // Match any _u1 or _u2 cookie pattern with any suffix
     const sessionCookies = sortedCookies.filter(c =>
-      c.name.includes('_u2main') ||
-      c.name.includes('_u1main') ||
-      c.name.includes('_u1_') ||
+      /_u2/.test(c.name) ||
+      /_u1/.test(c.name) ||
       c.name.includes('.sig')
     );
 
@@ -1225,11 +1678,11 @@ app.post('/api/audit', async (req, res) => {
             body: JSON.stringify({ x, y, payload }),
           });
           const encryptData = await encryptResponse.json();
+          console.log(`[Audit] Table ${table.name} encrypt response: z=${encryptData.z ? 'yes' : 'no'}`);
 
           if (!encryptData.z) return null;
 
-          // Fetch via worker
-          const elasticsearchUrl = `${baseUrl}/version-live/elasticsearch/search`;
+          // Fetch via worker (use 99reviews as proxy for non-userMode)
           const workerResponse = await fetch('https://api-worker.james-a7a.workers.dev', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1237,13 +1690,14 @@ app.post('/api/audit', async (req, res) => {
               x: encryptData.x,
               y: encryptData.y,
               z: encryptData.z,
-              appname: appName,
-              url: elasticsearchUrl,
+              appname: '99reviews-43419',
+              url: 'https://99reviews.io/version-live/elasticsearch/search',
               ...(cookies && { cookies }),
             }),
           });
 
           const workerData = await workerResponse.json();
+          console.log(`[Audit] Table ${table.name} worker response:`, workerData.error || `${workerData.body?.hits?.hits?.length || 0} hits`);
 
           // Parse results
           let results = [];
@@ -1251,7 +1705,11 @@ app.post('/api/audit', async (req, res) => {
             results = workerData.body.hits.hits.map(hit => ({ ...hit._source, _id: hit._id }));
           }
 
-          if (results.length === 0) return null;
+          if (results.length === 0) {
+            console.log(`[Audit] Table ${table.name}: no results`);
+            return null;
+          }
+          console.log(`[Audit] Table ${table.name}: ${results.length} results, columns:`, Object.keys(results[0] || {}));
 
           // Extract columns with samples
           const systemFields = ['_version', '_type', '_id'];
@@ -1373,21 +1831,125 @@ Max 4 tables, max 5 columns each, ordered by criticality. If risk is "none", tab
     summary.secure = summary.risk === 'none';
     console.log(`[Audit] Audit complete:`, JSON.stringify(summary));
 
-    // Step 5: Get app plan, page access, and editor access via Puppeteer
-    let appInfo = { appPlan: null, pageAccess: null, editorAccess: null };
+    // Step 5: Get record counts for flagged tables
+    if (summary.tables && summary.tables.length > 0) {
+      console.log(`[Audit] Fetching record counts for ${summary.tables.length} flagged tables...`);
+
+      const tablesWithCounts = await Promise.all(summary.tables.map(async (table) => {
+        try {
+          const tableType = table.name.toLowerCase() === 'user' ? 'user' : `custom.${table.name}`;
+
+          // Call aggregate API
+          const aggregateResponse = await fetch('https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              x,
+              y,
+              appname: '99reviews-43419',
+              target_appname: appName,
+              type: tableType,
+              app_version: 'live',
+            }),
+          });
+
+          const aggregateData = await aggregateResponse.json();
+
+          if (!aggregateData.z) {
+            console.log(`[Audit] Table ${table.name}: failed to get aggregate params`);
+            return { ...table, recordCount: null };
+          }
+
+          // Call aggregate worker
+          const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              x: aggregateData.x,
+              y: aggregateData.y,
+              z: aggregateData.z,
+              url: 'https://99reviews.io/version-live/elasticsearch/maggregate',
+            }),
+          });
+
+          const workerData = await workerResponse.json();
+          const count = workerData.count ||
+                        workerData.body?.responses?.[0]?.count ||
+                        workerData.body?.aggregations?.agg?.value ||
+                        0;
+
+          console.log(`[Audit] Table ${table.name}: ${count} records`);
+          return { ...table, recordCount: count };
+        } catch (err) {
+          console.error(`[Audit] Failed to get count for ${table.name}:`, err.message);
+          return { ...table, recordCount: null };
+        }
+      }));
+
+      summary.tables = tablesWithCounts;
+    }
+
+    // Step 6: Analyze workflow API endpoints for critical issues
+    let criticalApiIssues = 0;
     try {
-      console.log(`[Audit] Scanning for app plan, pages, and editor...`);
-      appInfo = await scanAppInfo(url);
-      console.log(`[Audit] App plan: ${appInfo.appPlan?.id || 'not found'}, Pages: ${appInfo.pageAccess?.length || 0}, Editor: ${appInfo.editorAccess?.accessible ? 'ACCESSIBLE' : 'protected'}`);
-    } catch (puppeteerError) {
-      console.error(`[Audit] Puppeteer scan failed:`, puppeteerError.message);
+      if (metaData.post && metaData.post.length > 0) {
+        const endpoints = metaData.post
+          .filter(wf => wf.endpoint)
+          .map(wf => ({
+            name: wf.endpoint,
+            authRequired: wf.auth_unecessary !== true
+          }));
+
+        if (endpoints.length > 0) {
+          console.log(`[Audit] Analyzing ${endpoints.length} workflow endpoints...`);
+
+          const endpointsList = endpoints.map(ep =>
+            `- ${ep.name} (auth_required: ${ep.authRequired})`
+          ).join('\n');
+
+          const endpointAnalysis = await anthropic.messages.create({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: 2048,
+            messages: [{
+              role: 'user',
+              content: `Analyze these API endpoint names and assess the security risk based on what each endpoint likely DOES.
+
+${endpointsList}
+
+IMPORTANT: Risk level should be based ONLY on what the action does, NOT on whether auth is required. Auth only affects WHO can exploit it, not the damage potential.
+
+For each endpoint, provide:
+"risk": "critical" | "high" | "medium" | "low" based on how dangerous the ACTION is:
+- critical: Financial actions (payments, billing), mass data export, account/user deletion, role changes
+- high: Send emails, modify user data, create accounts, access sensitive records
+- medium: Update settings, create standard records, standard CRUD operations
+- low: Read-only operations, user preferences, non-sensitive actions
+
+Respond with JSON only:
+{
+  "endpoint_name": { "risk": "critical" },
+  "other_endpoint": { "risk": "low" }
+}`
+            }]
+          });
+
+          const responseText = endpointAnalysis.content[0].text;
+          let jsonStr = responseText;
+          const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+          if (jsonMatch) jsonStr = jsonMatch[1];
+
+          const analysis = JSON.parse(jsonStr.trim());
+          criticalApiIssues = Object.values(analysis).filter(ep => ep.risk === 'critical').length;
+          console.log(`[Audit] Found ${criticalApiIssues} critical API issues`);
+        }
+      }
+    } catch (apiError) {
+      console.error(`[Audit] API endpoint analysis failed:`, apiError.message);
     }
 
     res.json({
       ...summary,
-      appPlan: appInfo.appPlan,
-      pageAccess: appInfo.pageAccess,
-      editorAccess: appInfo.editorAccess
+      criticalApiIssues
     });
   } catch (error) {
     console.error('[Audit] Error:', error);
@@ -2316,6 +2878,67 @@ app.post('/api/test-pages', async (req, res) => {
   }
 });
 
+// AI analysis to identify test/development pages
+app.post('/api/analyze-test-pages', async (req, res) => {
+  const { pages } = req.body;
+
+  if (!pages || pages.length === 0) {
+    return res.json({ testPages: [] });
+  }
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.status(500).json({ error: 'Anthropic API key not configured' });
+  }
+
+  try {
+    console.log(`[Test Pages AI] Analyzing ${pages.length} pages...`);
+
+    const pageAnalysis = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: `Analyze these page names from a web application and identify which ones appear to be test, development, or debug pages that likely shouldn't be publicly accessible in production.
+
+Page names:
+${pages.map(p => `- ${p}`).join('\n')}
+
+Look for pages that contain or suggest:
+- Test/testing purposes (test, testing, qa, sandbox)
+- Development/debugging (dev, debug, staging, temp, tmp)
+- Admin test pages (admin-test, test-admin)
+- Demo/sample pages (demo, sample, example)
+- Backup or old versions (backup, old, v1, deprecated)
+
+Do NOT flag:
+- Normal admin pages (admin, dashboard, settings)
+- Standard pages (home, about, contact, login, signup)
+- Feature pages even if they sound technical
+
+Respond with JSON only:
+{
+  "testPages": ["page-name-1", "page-name-2"]
+}
+
+If no test pages are found, return: { "testPages": [] }`
+      }]
+    });
+
+    const responseText = pageAnalysis.content[0].text;
+    let jsonStr = responseText;
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) jsonStr = jsonMatch[1];
+
+    const analysis = JSON.parse(jsonStr.trim());
+    console.log(`[Test Pages AI] Found ${(analysis.testPages || []).length} test pages`);
+
+    res.json({ testPages: analysis.testPages || [] });
+  } catch (error) {
+    console.error('[Test Pages AI] Error:', error);
+    res.status(500).json({ error: 'Failed to analyze test pages', details: error.message });
+  }
+});
+
 // SSE endpoint for streaming page access tests
 app.get('/api/test-pages-stream', async (req, res) => {
   const url = req.query.url;
@@ -2885,6 +3508,357 @@ app.post('/api/debug-compare', async (req, res) => {
 // Serve the main page
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
+});
+
+// Serve the performance scanner page
+app.get('/performance', (req, res) => {
+  res.sendFile(join(__dirname, 'public', 'performance.html'));
+});
+
+// Page performance API - uses Browserless to measure page load metrics
+app.post('/api/page-performance', async (req, res) => {
+  const { url, extractBubbleData = true } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'URL is required' });
+  }
+
+  if (!BROWSERLESS_API_KEY) {
+    return res.status(500).json({ error: 'BROWSERLESS_API_KEY not configured' });
+  }
+
+  try {
+    const response = await fetch(`https://chrome.browserless.io/function?token=${BROWSERLESS_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        code: `
+          export default async function({ page }) {
+            await page.goto('${url}', { waitUntil: 'networkidle0', timeout: 60000 });
+
+            const finalUrl = page.url();
+
+            const metrics = await page.evaluate(() => {
+              const nav = performance.getEntriesByType('navigation')[0];
+              const paints = performance.getEntriesByType('paint');
+              const resources = performance.getEntriesByType('resource');
+
+              const resourcesByType = {};
+              resources.forEach(r => {
+                const type = r.initiatorType || 'other';
+                if (!resourcesByType[type]) {
+                  resourcesByType[type] = { count: 0, sizeKB: 0, totalDuration: 0 };
+                }
+                resourcesByType[type].count++;
+                resourcesByType[type].sizeKB += Math.round(r.decodedBodySize / 1024);
+                resourcesByType[type].totalDuration += r.duration;
+              });
+
+              const allResources = resources.map(r => {
+                let host = '';
+                let path = '';
+                let filename = '';
+                let extension = '';
+                try {
+                  const url = new URL(r.name);
+                  host = url.hostname.replace('www.', '');
+                  path = url.pathname;
+                  filename = path.split('/').pop().split('?')[0] || path;
+                  extension = filename.includes('.') ? filename.split('.').pop().toLowerCase() : '';
+                } catch (e) {
+                  filename = r.name.split('/').pop().split('?')[0] || r.name;
+                }
+                return {
+                  name: filename,
+                  host: host,
+                  path: path,
+                  extension: extension,
+                  fullUrl: r.name,
+                  type: r.initiatorType || 'other',
+                  duration: Math.round(r.duration || 0),
+                  sizeKB: Math.round((r.decodedBodySize || r.transferSize || 0) / 1024)
+                };
+              });
+
+              let bubbleConfig = null;
+              const shouldExtractBubble = ${extractBubbleData};
+              if (shouldExtractBubble) try {
+                const plugins = [];
+                let pluginCountFromApp = 0;
+
+                if (window.appquery && typeof window.appquery.list_plugins === 'function') {
+                  try {
+                    const pluginList = window.appquery.list_plugins();
+                    if (Array.isArray(pluginList)) {
+                      pluginCountFromApp = pluginList.length;
+                    }
+                  } catch(e) {}
+                }
+
+                let pluginScriptCount = 0;
+                document.querySelectorAll('script[src]').forEach(s => {
+                  const src = s.src || '';
+                  if ((src.includes('plugin') || src.includes('cdn.bubble.io')) && src.endsWith('.js')) {
+                    pluginScriptCount++;
+                  }
+                });
+                pluginCountFromApp = Math.max(pluginCountFromApp, pluginScriptCount);
+
+                const pluginScripts = [];
+                document.querySelectorAll('script[src]').forEach(s => {
+                  const src = s.src || '';
+                  if (src.includes('plugin') || src.includes('cdn.bubble.io')) {
+                    const parts = src.split('/');
+                    const filename = parts[parts.length - 1].split('?')[0];
+                    if (filename && filename.endsWith('.js')) {
+                      const matchingResource = resources.find(r => r.name.includes(filename.replace('.js', '')));
+                      pluginScripts.push({
+                        filename: filename.replace('.js', ''),
+                        fullUrl: src,
+                        sizeKB: matchingResource ? matchingResource.decodedBodySize : 0,
+                        duration: matchingResource ? matchingResource.duration : 0
+                      });
+                    }
+                  }
+                });
+
+                if (plugins.length === 0 && pluginScripts.length > 0) {
+                  const seenNames = new Set();
+                  pluginScripts.forEach(script => {
+                    let name = script.filename.replace(/\\.min$/, '').replace(/[_-]/g, ' ').trim();
+                    name = name.charAt(0).toUpperCase() + name.slice(1);
+                    if (name && name.length > 2 && !seenNames.has(name.toLowerCase())) {
+                      seenNames.add(name.toLowerCase());
+                      plugins.push({
+                        id: script.filename,
+                        name: name,
+                        sizeKB: Math.round(script.sizeKB / 1024),
+                        duration: Math.round(script.duration)
+                      });
+                    }
+                  });
+                }
+
+                bubbleConfig = {
+                  plugins,
+                  pluginCountFromApp
+                };
+              } catch (e) {
+                bubbleConfig = { error: e.message };
+              }
+
+              let lcp = 0;
+              try {
+                const lcpDirect = performance.getEntriesByType('largest-contentful-paint');
+                if (lcpDirect.length > 0) {
+                  lcp = lcpDirect[lcpDirect.length - 1].startTime;
+                }
+                if (lcp === 0) {
+                  const fcp = paints.find(p => p.name === 'first-contentful-paint')?.startTime || 0;
+                  const loaded = nav.loadEventEnd || 0;
+                  lcp = Math.max(fcp, loaded);
+                }
+              } catch (e) {
+                lcp = nav.loadEventEnd || 0;
+              }
+
+              return {
+                bubble: bubbleConfig,
+                timeline: {
+                  redirect: { start: 0, end: Math.round(nav.fetchStart || 0) },
+                  dnsLookup: { start: Math.round(nav.domainLookupStart || 0), end: Math.round(nav.domainLookupEnd || 0) },
+                  connection: { start: Math.round(nav.connectStart || 0), end: Math.round(nav.connectEnd || 0) },
+                  serverResponse: { start: Math.round(nav.requestStart || 0), end: Math.round(nav.responseStart || 0) },
+                  download: { start: Math.round(nav.responseStart || 0), end: Math.round(nav.responseEnd || 0) },
+                  domProcessing: { start: Math.round(nav.responseEnd || 0), end: Math.round(nav.domInteractive || 0) },
+                  resourceLoading: { start: Math.round(nav.domInteractive || 0), end: Math.round(nav.loadEventEnd || 0) }
+                },
+                milestones: {
+                  firstPaint: Math.round(paints.find(p => p.name === 'first-paint')?.startTime || 0),
+                  firstContentfulPaint: Math.round(paints.find(p => p.name === 'first-contentful-paint')?.startTime || 0),
+                  domReady: Math.round(nav.domContentLoadedEventEnd || 0),
+                  fullyLoaded: Math.round(nav.loadEventEnd || 0),
+                  largestContentfulPaint: Math.round(lcp)
+                },
+                resources: {
+                  total: resources.length,
+                  totalSizeKB: Math.round(resources.reduce((sum, r) => sum + r.decodedBodySize, 0) / 1024),
+                  byType: resourcesByType,
+                  all: allResources
+                },
+                firstPaint: paints.find(p => p.name === 'first-paint')?.startTime,
+                domContentLoaded: nav?.domContentLoadedEventEnd,
+                loadComplete: nav?.loadEventEnd
+              };
+            });
+
+            return { url: '${url}', finalUrl, metrics };
+          }
+        `
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Browserless API error: ${response.status} - ${text}`);
+    }
+
+    const data = await response.json();
+
+    try {
+      const requestedUrl = new URL(url);
+      const finalUrl = new URL(data.finalUrl || url);
+      const requestedPage = requestedUrl.pathname.replace(/^\//, '').split('/').pop() || 'index';
+      const finalPage = finalUrl.pathname.replace(/^\//, '').split('/').pop() || 'index';
+      data.metrics.redirect = {
+        redirected: finalPage !== requestedPage,
+        finalPage,
+        requestedPage
+      };
+    } catch (e) {
+      data.metrics.redirect = { redirected: false };
+    }
+
+    if (data?.metrics?.bubble?.plugins?.length > 0) {
+      data.metrics.bubble.plugins.sort((a, b) => (b.duration || 0) - (a.duration || 0));
+    }
+
+    res.json(data);
+  } catch (error) {
+    console.error('Page performance error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Generate PDF performance report
+app.post('/api/generate-pdf', async (req, res) => {
+  const { appUrl, appName, pages, pluginCount, workflowCount } = req.body;
+
+  if (!pages || pages.length === 0) {
+    return res.status(400).json({ error: 'No pages data provided' });
+  }
+
+  if (!BROWSERLESS_API_KEY) {
+    return res.status(500).json({ error: 'BROWSERLESS_API_KEY not configured' });
+  }
+
+  try {
+    const validPages = pages.filter(p => p.lcp > 0 || p.fullyLoaded > 0);
+    const avgLoadTime = validPages.length > 0
+      ? Math.round(validPages.reduce((sum, p) => sum + (p.lcp || p.fullyLoaded), 0) / validPages.length)
+      : 0;
+    const benchmark = 2000;
+    const percentSlower = Math.round(((avgLoadTime - benchmark) / benchmark) * 100);
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600&family=DM+Serif+Display&display=swap" rel="stylesheet">
+  <style>
+    @page { size: A4; margin: 0; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Space Grotesk', sans-serif;
+      padding: 48px 32px 32px 32px;
+      color: #18181b;
+      background: linear-gradient(to bottom, #ffffff 0%, #FFF6F0 100%);
+    }
+    .header { text-align: center; margin-bottom: 20px; }
+    .header h1 { font-family: 'DM Serif Display', serif; font-size: 36px; margin-bottom: 6px; }
+    .header .subtitle { font-size: 16px; color: #71717a; }
+    .summary-banner {
+      background: linear-gradient(135deg, #FFF6F0 0%, #FFEEDB 100%);
+      border-radius: 10px; padding: 16px; margin-bottom: 16px;
+      border: 1px solid rgba(255, 189, 148, 0.3); display: flex; gap: 16px;
+    }
+    .summary-col { flex: 1; }
+    .summary-left { text-align: center; border-right: 1px solid rgba(255, 189, 148, 0.3); padding-right: 16px; }
+    .summary-big-number { font-size: 36px; font-weight: 700; line-height: 1; }
+    .summary-big-number.slow { color: #dc2626; }
+    .summary-big-number.moderate { color: #b45309; }
+    .summary-big-number.fast { color: #15803d; }
+    .summary-label { font-size: 10px; color: #64748b; margin-top: 4px; margin-bottom: 6px; }
+    .summary-benchmark { display: inline-block; font-size: 9px; font-weight: 600; padding: 3px 8px; border-radius: 20px; }
+    .summary-benchmark.slow { color: #dc2626; background: #fee2e2; }
+    .summary-benchmark.fast { color: #15803d; background: #dcfce7; }
+    .card { background: rgba(255, 255, 255, 0.8); border-radius: 10px; padding: 14px; border: 1px solid rgba(0, 0, 0, 0.05); }
+    .pages-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    .pages-table th { text-align: left; font-size: 9px; font-weight: 600; color: #71717a; text-transform: uppercase; padding: 8px 10px; border-bottom: 1px solid rgba(0, 0, 0, 0.1); }
+    .pages-table th:not(:first-child) { text-align: right; }
+    .pages-table td { padding: 6px 10px; border-bottom: 1px solid rgba(0, 0, 0, 0.05); }
+    .pages-table td:not(:first-child) { text-align: right; }
+    .page-name { font-weight: 500; color: #18181b; }
+    .page-time { font-weight: 600; font-size: 10px; }
+    .page-time.slow { color: #dc2626; }
+    .page-time.moderate { color: #b45309; }
+    .page-time.fast { color: #15803d; }
+    .page-pill { display: inline-block; padding: 3px 10px; border-radius: 20px; font-weight: 600; font-size: 10px; }
+    .page-pill.slow { color: #dc2626; background: #fee2e2; }
+    .page-pill.moderate { color: #b45309; background: #fef3c7; }
+    .page-pill.fast { color: #15803d; background: #dcfce7; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Bubble Page Load Speed Report</h1>
+    <div class="subtitle">${appName || appUrl}</div>
+  </div>
+  <div class="summary-banner">
+    <div class="summary-col summary-left">
+      <div class="summary-big-number ${avgLoadTime > 3000 ? 'slow' : avgLoadTime > 2000 ? 'moderate' : 'fast'}">${(avgLoadTime / 1000).toFixed(1)}s</div>
+      <div class="summary-label">Average load time</div>
+      <div class="summary-benchmark ${percentSlower > 0 ? 'slow' : 'fast'}">
+        ${percentSlower > 0 ? percentSlower + '% slower than Bubble average' : Math.abs(percentSlower) + '% faster than Bubble average'}
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <table class="pages-table">
+      <thead>
+        <tr><th>Page</th><th>Redirects</th><th>Resources</th><th>First Paint</th><th>Fully Loaded</th></tr>
+      </thead>
+      <tbody>
+        ${[...pages].sort((a, b) => (b.fullyLoaded || 0) - (a.fullyLoaded || 0)).map(page => {
+          const formatTime = (ms) => ms > 0 ? (ms / 1000).toFixed(1) + 's' : '-';
+          const getClass = (ms) => ms > 3000 ? 'slow' : ms > 2000 ? 'moderate' : 'fast';
+          return '<tr><td class="page-name">' + page.name + '</td><td class="page-time ' + (page.redirected ? 'slow' : '') + '">' + (page.redirected ? 'Y' : '') + '</td><td class="page-time ' + getClass(page.fullyLoaded) + '">' + formatTime(page.fullyLoaded) + '</td><td class="page-time ' + getClass(page.firstPaint) + '">' + formatTime(page.firstPaint) + '</td><td><span class="page-pill ' + getClass(page.lcp) + '">' + formatTime(page.lcp) + '</span></td></tr>';
+        }).join('')}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+    `;
+
+    const response = await fetch(`https://chrome.browserless.io/pdf?token=${BROWSERLESS_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        html: html,
+        options: {
+          format: 'A4',
+          printBackground: true,
+          margin: { top: '0px', right: '0px', bottom: '0px', left: '0px' }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Browserless PDF error: ${response.status} - ${text}`);
+    }
+
+    const pdfBuffer = await response.arrayBuffer();
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="performance-report-${appName || 'app'}.pdf"`);
+    res.send(Buffer.from(pdfBuffer));
+
+  } catch (error) {
+    console.error('[PDF] Generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.listen(PORT, () => {

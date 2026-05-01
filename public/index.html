@@ -102,6 +102,18 @@
         <div id="pagesList" class="pages-list"></div>
       </div>
 
+      <!-- Audit Panel -->
+      <div id="auditPanel" class="tab-panel hidden">
+        <div id="auditLoading" class="endpoints-loading hidden">
+          <div class="spinner-small"></div>
+          <span>Running access audit...</span>
+        </div>
+        <div id="auditEmpty" class="endpoints-empty hidden">
+          <p>No audit results. Run an access audit from the user profile sidebar.</p>
+        </div>
+        <div id="auditList" class="audit-list"></div>
+      </div>
+
       <!-- Text Summary Section -->
       <div id="textSummarySection" class="text-summary-section hidden">
         <div class="text-summary-header" onclick="toggleTextSummary()">
@@ -203,6 +215,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=126"></script>
+  <script src="app.js?v=139"></script>
 </body>
 </html>
