@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Bubble App Security Scanner - a web tool for auditing Bubble.io applications to detect exposed sensitive data. Uses Claude AI to classify data sensitivity (HIGH/MODERATE/LOW) at both table and column levels.
+Bubble App Security Scanner - a web tool for auditing Bubble.io applications to detect exposed sensitive data. Uses Claude AI to classify data sensitivity (HIGH/MODERATE/LOW) at both table and column levels. Also includes a performance scanner for analyzing page load times.
 
 ## Commands
 
@@ -26,26 +26,17 @@ CLOUDFLARE_ACCOUNT_ID=your_id_here  # Optional: for /api/extract-contact
 CLOUDFLARE_API_TOKEN=your_token_here  # Optional: for /api/extract-contact
 ```
 
-## File Structure
-
-```
-server.js           # Express backend (~3500 lines)
-public/
-  app.js            # Frontend logic (~5400 lines)
-  index.html        # Single page UI
-  styles.css        # Glassmorphism CSS (~5400 lines)
-vercel.json         # Vercel deployment config
-```
-
 No test suite exists in this project.
 
 ## Architecture
 
 **Simple Node.js + vanilla JS stack (ES modules):**
-- `server.js` - Express backend with all API endpoints
-- `public/app.js` - Frontend state management and UI logic
-- `public/index.html` - Single page UI with 4 tabs (Data, Endpoints, API Keys, Pages)
-- `public/styles.css` - Glassmorphism styling
+- `server.js` - Express backend with all API endpoints (~3700 lines)
+- `public/app.js` - Security scanner frontend (~5400 lines)
+- `public/index.html` - Security scanner UI with 4 tabs (Data, Endpoints, API Keys, Pages)
+- `public/performance.js` - Performance scanner frontend (~1200 lines)
+- `public/performance.html` - Performance scanner UI
+- `public/styles.css` - Shared glassmorphism styling (~5400 lines)
 
 **Scan Modes:**
 - **Normal mode** - Fetches data via Cloudflare Worker proxy with encryption params
@@ -105,10 +96,15 @@ No test suite exists in this project.
 - `POST /api/scan-api-keys` - Scan client-side JS for exposed API keys
 - `POST /api/test-pages` - Test page access with pagination (20 pages/batch)
 - `GET /api/test-pages-stream` - SSE streaming for real-time page test results
+- `POST /api/analyze-test-pages` - AI analysis of page access patterns
 - `POST /api/app-plan` - Get Bubble app plan info
 - `POST /api/admin-email` - Get Bubble app admin email from appquery.custom_domain_admin_email()
 - `POST /api/app-info` - Get Bubble app ID and favicon from appquery.id() and appquery.favicon()
 - `POST /api/extract-contact` - Extract contact email and LinkedIn using Cloudflare Browser Rendering AI
+
+**Performance Scanning:**
+- `POST /api/page-performance` - Get detailed page load metrics (timeline, milestones, resources, plugins)
+- `POST /api/generate-pdf` - Generate PDF performance report
 
 All AI endpoints return JSON responses. SSE endpoints use `text/event-stream` content type.
 
@@ -157,11 +153,12 @@ The frontend accepts these query parameters for testing and automation:
 
 ## Implementation Notes
 
-**Performance:**
+**Performance Optimization:**
 - Frontend processes tables in parallel batches of 4
 - Column sensitivity is cached in `state.allColumnSensitivity` to avoid re-analysis
 - Page testing uses pagination (20 pages/batch) for Vercel's 60s timeout
 - SSE streaming (`/api/test-pages-stream`) provides real-time feedback during scans
+- Performance scanner extracts Bubble data (plugins/workflows) only for first page to reduce overhead
 
 **Data Handling:**
 - Manual overrides in `state.manualColumnOverrides` take priority over AI classifications
@@ -169,5 +166,6 @@ The frontend accepts these query parameters for testing and automation:
 - Cookies passed to `mget` when available (all cookies except debug)
 
 **Puppeteer/Browser:**
-- Local Chrome for development (auto-detected from common paths)
+- Local Chrome for development (auto-detected from common paths in `findLocalChrome()`)
 - Browserless.io for production/Vercel (requires `BROWSERLESS_API_KEY`)
+- Performance metrics collected via Chrome DevTools Protocol (timeline, milestones, resources)

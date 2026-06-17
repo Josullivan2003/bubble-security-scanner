@@ -54,25 +54,35 @@ app.get('/api/test-anthropic', async (req, res) => {
     return res.json({ success: false, error: 'ANTHROPIC_API_KEY not set' });
   }
 
-  try {
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 50,
-      messages: [{ role: 'user', content: 'Say "API working" in 2 words.' }]
-    });
-    console.log('[Test] Success:', response.content[0].text);
-    res.json({ success: true, response: response.content[0].text, model: 'claude-sonnet-4-20250514' });
-  } catch (error) {
-    console.error('[Test] Anthropic error:', error.message);
-    console.error('[Test] Full error:', error);
-    res.json({
-      success: false,
-      error: error.message,
-      type: error.constructor.name,
-      status: error.status,
-      details: error.error || null
-    });
+  // Try multiple model names to find one that works
+  const modelsToTry = [
+    'claude-sonnet-4-20250514',
+    'claude-3-5-sonnet-latest',
+    'claude-3-5-sonnet-20241022',
+    'claude-3-sonnet-20240229',
+    'claude-3-haiku-20240307'
+  ];
+
+  for (const model of modelsToTry) {
+    try {
+      console.log(`[Test] Trying model: ${model}`);
+      const response = await anthropic.messages.create({
+        model,
+        max_tokens: 50,
+        messages: [{ role: 'user', content: 'Say "API working" in 2 words.' }]
+      });
+      console.log(`[Test] Success with ${model}:`, response.content[0].text);
+      return res.json({ success: true, response: response.content[0].text, model, testedModels: modelsToTry });
+    } catch (error) {
+      console.log(`[Test] Model ${model} failed:`, error.message);
+    }
   }
+
+  res.json({
+    success: false,
+    error: 'All models failed',
+    testedModels: modelsToTry
+  });
 });
 
 // Proxy endpoint for DBML schema
