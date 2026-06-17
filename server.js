@@ -44,6 +44,37 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(join(__dirname, 'public')));
 
+// Debug endpoint to test Anthropic API connection
+app.get('/api/test-anthropic', async (req, res) => {
+  console.log('[Test] Checking Anthropic API...');
+  console.log('[Test] API Key present:', !!process.env.ANTHROPIC_API_KEY);
+  console.log('[Test] API Key prefix:', process.env.ANTHROPIC_API_KEY?.substring(0, 10) + '...');
+
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return res.json({ success: false, error: 'ANTHROPIC_API_KEY not set' });
+  }
+
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 50,
+      messages: [{ role: 'user', content: 'Say "API working" in 2 words.' }]
+    });
+    console.log('[Test] Success:', response.content[0].text);
+    res.json({ success: true, response: response.content[0].text, model: 'claude-sonnet-4-20250514' });
+  } catch (error) {
+    console.error('[Test] Anthropic error:', error.message);
+    console.error('[Test] Full error:', error);
+    res.json({
+      success: false,
+      error: error.message,
+      type: error.constructor.name,
+      status: error.status,
+      details: error.error || null
+    });
+  }
+});
+
 // Proxy endpoint for DBML schema
 app.get('/api/schema', async (req, res) => {
   const { url } = req.query;
