@@ -1371,7 +1371,6 @@ async function analyzeColumnSensitivity() {
   }
 
   // Always cache the results (even if AI failed, we have columns as 'low')
-  const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
   if (useLoggedIn) {
     state.loggedInData.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
   } else {
