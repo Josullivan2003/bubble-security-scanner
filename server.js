@@ -950,6 +950,74 @@ app.post('/api/aggregate-column-distinct', async (req, res) => {
   }
 });
 
+// Endpoint for counting non-empty column values
+app.post('/api/aggregate-column-count', async (req, res) => {
+  const { x, y, appName, tableType, column, version } = req.body;
+
+  if (!x || !y || !appName || !tableType || !column) {
+    return res.status(400).json({ error: 'x, y, appName, tableType, and column are required' });
+  }
+
+  const versionValue = version ? version.replace('version-', '') : 'live';
+
+  try {
+    const aggregateUrl = 'https://5r6gtzlbpf.execute-api.us-east-1.amazonaws.com/prod/aggregate';
+
+    // Use constraint to count records where column is not empty
+    const aggregatePayload = {
+      x,
+      y,
+      appname: '99reviews-43419',
+      target_appname: appName,
+      type: tableType,
+      app_version: versionValue,
+      constraints: [
+        {
+          key: column,
+          constraint_type: 'is_not_empty'
+        }
+      ]
+    };
+
+    const aggregateResponse = await fetch(aggregateUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(aggregatePayload),
+    });
+
+    const aggregateData = await aggregateResponse.json();
+
+    if (!aggregateData.z) {
+      return res.json({ count: 0, error: 'Failed to get aggregate params' });
+    }
+
+    // Step 2: Call aggregate-worker to get the count
+    const versionPath = version || 'version-live';
+    const workerResponse = await fetch('https://aggregate-worker.james-a7a.workers.dev/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        x: aggregateData.x,
+        y: aggregateData.y,
+        z: aggregateData.z,
+        url: `https://99reviews.io/${versionPath}/elasticsearch/maggregate`,
+      }),
+    });
+
+    const workerData = await workerResponse.json();
+
+    const count = workerData.count ||
+                  workerData.body?.responses?.[0]?.count ||
+                  workerData.body?.aggregations?.agg?.value ||
+                  0;
+
+    res.json({ count });
+  } catch (error) {
+    console.error('Column count error:', error);
+    res.status(500).json({ error: 'Failed to get column count', details: error.message });
+  }
+});
+
 // Endpoint to fetch user profile by ID via mget worker
 app.post('/api/mget', async (req, res) => {
   const { x, y, appName, appUrl, ids, version, cookies } = req.body;

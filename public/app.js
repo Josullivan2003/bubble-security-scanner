@@ -7,6 +7,7 @@ let state = {
   tableSensitivity: {},           // Table-level sensitivity (derived from columns)
   tableDescriptions: {},          // AI-generated table descriptions: { tableId: description }
   allColumnSensitivity: {},       // Column sensitivity for all tables: { tableId: { colName: sensitivity } }
+  allColumnCounts: {},            // Non-empty record counts per column: { tableId: { colName: count } }
   columnSensitivity: {},          // Sensitivity for current table's columns (active view)
   manualColumnOverrides: {},      // Manual column sensitivity overrides: { tableId: { colName: sensitivity } }
   sensitivityLoading: false,      // Whether sensitivity analysis is in progress
@@ -320,6 +321,9 @@ async function analyzeSensitivity() {
     console.log(`Failed to analyze ${state.failedTables.length} tables after retry`);
   }
 
+  // Fetch column counts for export (runs in background)
+  fetchAllColumnCounts();
+
   // Generate table descriptions for export
   fetchTableDescriptions();
 
@@ -471,6 +475,69 @@ async function analyzeTableSensitivity(table) {
       state.failedTables.push(table);
     }
   }
+}
+
+// Fetch non-empty counts for all columns in tables with data
+async function fetchAllColumnCounts() {
+  console.log('[Column Counts] Starting column count fetch...');
+  state.allColumnCounts = {};
+
+  // Get tables that have column data
+  const tablesWithColumns = state.tables.filter(t => {
+    const cols = state.allColumnSensitivity[t.id];
+    return cols && Object.keys(cols).length > 0;
+  });
+
+  if (tablesWithColumns.length === 0) {
+    console.log('[Column Counts] No tables with columns to count');
+    return;
+  }
+
+  // Process tables in batches of 2 to avoid overwhelming the API
+  const BATCH_SIZE = 2;
+  for (let i = 0; i < tablesWithColumns.length; i += BATCH_SIZE) {
+    const batch = tablesWithColumns.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map(table => fetchColumnCountsForTable(table.id)));
+  }
+
+  console.log('[Column Counts] Complete:', state.allColumnCounts);
+}
+
+// Fetch column counts for a single table
+async function fetchColumnCountsForTable(tableId) {
+  const columns = Object.keys(state.allColumnSensitivity[tableId] || {});
+  if (columns.length === 0) return;
+
+  state.allColumnCounts[tableId] = {};
+
+  // Fetch counts for each column (in parallel, max 4 at a time)
+  const COLUMN_BATCH = 4;
+  for (let i = 0; i < columns.length; i += COLUMN_BATCH) {
+    const columnBatch = columns.slice(i, i + COLUMN_BATCH);
+    await Promise.all(columnBatch.map(async (column) => {
+      try {
+        const response = await fetch('/api/aggregate-column-count', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            x: state.xValue,
+            y: state.yValue,
+            appName: state.appName,
+            tableType: getTableType(tableId),
+            column: column,
+            version: state.version
+          })
+        });
+        const data = await response.json();
+        state.allColumnCounts[tableId][column] = data.count ?? 0;
+      } catch (error) {
+        console.error(`[Column Counts] Error counting ${tableId}.${column}:`, error);
+        state.allColumnCounts[tableId][column] = '?';
+      }
+    }));
+  }
+
+  console.log(`[Column Counts] ${tableId}: ${columns.length} columns counted`);
 }
 
 // Fetch a small sample of data from a table for sensitivity analysis
@@ -5296,17 +5363,16 @@ window.exportSchemaCSV = async function(roleName) {
   console.log('Table descriptions available:', Object.keys(state.tableDescriptions || {}).length);
   console.log('Descriptions:', state.tableDescriptions);
 
-  // Build CSV rows - grouped by table
-  // Table metadata only on first row, then blank for subsequent columns (for Excel cell merging)
-  const header = ['Table', 'Description', 'Table Classification', 'Record Count', 'Column', 'Column Classification', 'Visible'];
+  // Build CSV rows - one row per column with column-level counts
+  const header = ['Table', 'Description', 'Table Classification', 'Column', 'Column Classification', 'Column Count', 'Visible'];
   const rows = [header];
 
   for (const table of state.tables) {
     const tableId = table.id;
     const tableColumns = columnSensitivityData?.[tableId] || {};
     const columnNames = Object.keys(tableColumns);
+    const columnCounts = state.allColumnCounts?.[tableId] || {};
 
-    const recordCount = recordCountData?.[tableId] ?? table.recordCount ?? 0;
     const tableSensitivity = sensitivityData?.[tableId];
     const description = state.tableDescriptions?.[tableId] || '';
     const tableClassification = tableSensitivity?.sensitivity || 'low';
@@ -5319,9 +5385,9 @@ window.exportSchemaCSV = async function(roleName) {
         tableId,
         description,
         tableClassification,
-        recordCount,
         sortedColumns[0],
         tableColumns[sortedColumns[0]] || 'low',
+        columnCounts[sortedColumns[0]] ?? '?',
         'Yes'
       ]);
 
@@ -5332,9 +5398,9 @@ window.exportSchemaCSV = async function(roleName) {
           '',  // Empty for cell merging
           '',
           '',
-          '',
           colName,
           tableColumns[colName] || 'low',
+          columnCounts[colName] ?? '?',
           'Yes'
         ]);
       }
@@ -5344,9 +5410,9 @@ window.exportSchemaCSV = async function(roleName) {
         tableId,
         description,
         tableClassification,
-        recordCount,
         '(no columns)',
         '',
+        0,
         'No'
       ]);
     }
