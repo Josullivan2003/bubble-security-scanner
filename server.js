@@ -56,7 +56,7 @@ app.get('/api/test-anthropic', async (req, res) => {
 
   // Try multiple model names to find one that works
   const modelsToTry = [
-    'claude-sonnet-4-20250514',
+    'claude-sonnet-4-6',
     'claude-3-5-sonnet-latest',
     'claude-3-5-sonnet-20241022',
     'claude-3-sonnet-20240229',
@@ -178,7 +178,7 @@ app.post('/api/analyze-sensitivity', async (req, res) => {
     }).join('\n\n');
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 4096,
       messages: [
         {
@@ -266,7 +266,7 @@ app.post('/api/analyze-columns', async (req, res) => {
 
   try {
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2048,
       messages: [
         {
@@ -382,7 +382,7 @@ app.post('/api/generate-table-descriptions', async (req, res) => {
     }).join('\n');
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2048,
       messages: [
         {
@@ -442,7 +442,7 @@ app.post('/api/generate-summary', async (req, res) => {
     }).join('\n');
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       messages: [
         {
@@ -1841,7 +1841,7 @@ app.post('/api/audit', async (req, res) => {
 
           // Analyze columns
           const analysisResponse = await anthropic.messages.create({
-            model: 'claude-sonnet-4-20250514',
+            model: 'claude-sonnet-4-6',
             max_tokens: 2048,
             messages: [{
               role: 'user',
@@ -1903,7 +1903,7 @@ Only include HIGH or MODERATE columns.`
 
     // Step 4: Generate prioritized summary with risk classification
     const summaryResponse = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       messages: [{
         role: 'user',
@@ -2017,7 +2017,7 @@ Max 4 tables, max 5 columns each, ordered by criticality. If risk is "none", tab
           ).join('\n');
 
           const endpointAnalysis = await anthropic.messages.create({
-            model: 'claude-sonnet-4-20250514',
+            model: 'claude-sonnet-4-6',
             max_tokens: 2048,
             messages: [{
               role: 'user',
@@ -2172,7 +2172,7 @@ app.post('/api/analyze-endpoint-risk', async (req, res) => {
     ).join('\n');
 
     const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2048,
       messages: [
         {
@@ -3003,7 +3003,7 @@ app.post('/api/analyze-test-pages', async (req, res) => {
     console.log(`[Test Pages AI] Analyzing ${pages.length} pages...`);
 
     const pageAnalysis = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       messages: [{
         role: 'user',
@@ -3381,7 +3381,7 @@ LOW = Minor information disclosure, minimal risk
 Only report actual security issues. Parameters marked "private":true are SAFE.`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2000,
       messages: [
         { role: 'user', content: analysisPrompt }
