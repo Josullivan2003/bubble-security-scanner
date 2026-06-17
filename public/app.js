@@ -403,53 +403,58 @@ async function analyzeTableSensitivity(table) {
       return;
     }
 
-    // Call column-level analysis API
-    const response = await fetch('/api/analyze-columns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tableName: table.id,
-        columnsWithSamples: columnsWithSamples
-      })
-    });
-
-    const data = await response.json();
-
-    if (data.error) {
-      console.error(`Column analysis failed for ${table.id}:`, data.error);
-      return;
-    }
-
-    // Store column sensitivity for this table
+    // Store column sensitivity for this table - initialize with all columns as 'low'
+    // This ensures columns are tracked even if AI analysis fails
     const columnSensitivity = {};
-    let highestSensitivity = 'low';
-    const sensitiveFields = [];
-
-    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
-    console.log(`[Batch] ${table.id}: Marking ${columnsWithSamples.length} columns as visible:`, columnsWithSamples.map(c => c.name));
     columnsWithSamples.forEach(col => {
       columnSensitivity[col.name] = 'low';
     });
 
-    // Then override with AI classifications for HIGH/MODERATE fields
-    if (data.fields && Array.isArray(data.fields)) {
-      console.log(`[Batch] ${table.id}: AI classified ${data.fields.length} fields:`, data.fields.map(f => `${f.name}:${f.sensitivity}`));
-      data.fields.forEach(field => {
-        columnSensitivity[field.name] = field.sensitivity;
-        sensitiveFields.push(field.name);
-
-        // Track highest sensitivity
-        if (field.sensitivity === 'high') {
-          highestSensitivity = 'high';
-        } else if (field.sensitivity === 'moderate' && highestSensitivity !== 'high') {
-          highestSensitivity = 'moderate';
-        }
+    // Call column-level analysis API
+    let aiAnalysisFailed = false;
+    try {
+      const response = await fetch('/api/analyze-columns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableName: table.id,
+          columnsWithSamples: columnsWithSamples
+        })
       });
+
+      const data = await response.json();
+
+      if (data.error) {
+        console.error(`Column analysis API error for ${table.id}:`, data.error);
+        aiAnalysisFailed = true;
+      } else if (data.fields && Array.isArray(data.fields)) {
+        // Override with AI classifications for HIGH/MODERATE fields
+        console.log(`[Batch] ${table.id}: AI classified ${data.fields.length} fields:`, data.fields.map(f => `${f.name}:${f.sensitivity}`));
+        data.fields.forEach(field => {
+          columnSensitivity[field.name] = field.sensitivity;
+        });
+      }
+    } catch (apiError) {
+      console.error(`Column analysis fetch error for ${table.id}:`, apiError);
+      aiAnalysisFailed = true;
     }
 
-    // Store results
-    console.log(`[Batch] ${table.id}: Final columnSensitivity has ${Object.keys(columnSensitivity).length} columns`);
+    // Always store columns (even if AI failed, we have them as 'low')
+    console.log(`[Batch] ${table.id}: Storing ${Object.keys(columnSensitivity).length} columns${aiAnalysisFailed ? ' (AI analysis failed)' : ''}`);
     state.allColumnSensitivity[table.id] = columnSensitivity;
+
+    // Calculate highest sensitivity and sensitive fields for table classification
+    let highestSensitivity = 'low';
+    const sensitiveFields = [];
+    Object.entries(columnSensitivity).forEach(([name, sensitivity]) => {
+      if (sensitivity === 'high') {
+        highestSensitivity = 'high';
+        sensitiveFields.push(name);
+      } else if (sensitivity === 'moderate' && highestSensitivity !== 'high') {
+        highestSensitivity = 'moderate';
+        sensitiveFields.push(name);
+      }
+    });
 
     // Derive table sensitivity from column analysis
     if (highestSensitivity !== 'low') {
@@ -1332,6 +1337,13 @@ async function analyzeColumnSensitivity() {
 
   console.log('Sending columns for analysis:', columnsWithSamples.length, columnsWithSamples);
 
+  // Initialize column sensitivity with all columns as 'low' first
+  // This ensures columns are tracked even if AI analysis fails
+  state.columnSensitivity = {};
+  columnsWithSamples.forEach(col => {
+    state.columnSensitivity[col.name] = 'low';
+  });
+
   try {
     const response = await fetch('/api/analyze-columns', {
       method: 'POST',
@@ -1345,47 +1357,30 @@ async function analyzeColumnSensitivity() {
     const data = await response.json();
 
     if (data.error) {
-      console.error('Column analysis failed:', data.error);
-      state.columnSensitivityLoading = false;
-      if (state.showSensitiveOnly) {
-        renderResultsTable();
-      }
-      return;
-    }
-
-    // Store column sensitivity with exact column names
-    state.columnSensitivity = {};
-
-    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
-    columnsWithSamples.forEach(col => {
-      state.columnSensitivity[col.name] = 'low';
-    });
-
-    // Then override with AI classifications for HIGH/MODERATE fields
-    if (data.fields && Array.isArray(data.fields)) {
+      console.error('Column analysis API failed:', data.error);
+      // Continue - columns already initialized as 'low'
+    } else if (data.fields && Array.isArray(data.fields)) {
+      // Override with AI classifications for HIGH/MODERATE fields
       data.fields.forEach(field => {
         state.columnSensitivity[field.name] = field.sensitivity;
       });
     }
-
-    // Also cache for future use in the appropriate cache
-    const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
-    if (useLoggedIn) {
-      state.loggedInData.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
-    } else {
-      state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
-    }
-
-    // Hide loading state and re-render table to show indicators
-    state.columnSensitivityLoading = false;
-    renderResultsTable();
   } catch (error) {
-    console.error('Column analysis error:', error);
-    state.columnSensitivityLoading = false;
-    if (state.showSensitiveOnly) {
-      renderResultsTable(); // Re-render to remove loading state
-    }
+    console.error('Column analysis fetch error:', error);
+    // Continue - columns already initialized as 'low'
   }
+
+  // Always cache the results (even if AI failed, we have columns as 'low')
+  const useLoggedIn = state.currentView === 'logged-in' && state.hasAuthData;
+  if (useLoggedIn) {
+    state.loggedInData.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+  } else {
+    state.allColumnSensitivity[state.selectedTable] = { ...state.columnSensitivity };
+  }
+
+  // Hide loading state and re-render table to show indicators
+  state.columnSensitivityLoading = false;
+  renderResultsTable();
 }
 
 // Get field sensitivity for current table (exact match on actual column names)
@@ -1979,48 +1974,55 @@ async function analyzeTableAuthenticated(table) {
       return;
     }
 
-    // Call column-level analysis API
-    const response = await fetch('/api/analyze-columns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        tableName: table.id,
-        columnsWithSamples: columnsWithSamples
-      })
-    });
-
-    const data = await response.json();
-
-    if (data.error) {
-      console.error(`Authenticated column analysis failed for ${table.id}:`, data.error);
-      return;
-    }
-
-    // Store column sensitivity
+    // Initialize column sensitivity with all columns as 'low'
+    // This ensures columns are tracked even if AI analysis fails
     const columnSensitivity = {};
-    let highestSensitivity = 'low';
-    const sensitiveFields = [];
-
-    // First, mark all columns that were returned by API as 'low' (visible but not sensitive)
     columnsWithSamples.forEach(col => {
       columnSensitivity[col.name] = 'low';
     });
 
-    // Then override with AI classifications for HIGH/MODERATE fields
-    if (data.fields && Array.isArray(data.fields)) {
-      data.fields.forEach(field => {
-        columnSensitivity[field.name] = field.sensitivity;
-        sensitiveFields.push(field.name);
-
-        if (field.sensitivity === 'high') {
-          highestSensitivity = 'high';
-        } else if (field.sensitivity === 'moderate' && highestSensitivity !== 'high') {
-          highestSensitivity = 'moderate';
-        }
+    // Call column-level analysis API
+    try {
+      const response = await fetch('/api/analyze-columns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableName: table.id,
+          columnsWithSamples: columnsWithSamples
+        })
       });
+
+      const data = await response.json();
+
+      if (data.error) {
+        console.error(`Authenticated column analysis API error for ${table.id}:`, data.error);
+        // Continue - columns already initialized as 'low'
+      } else if (data.fields && Array.isArray(data.fields)) {
+        // Override with AI classifications for HIGH/MODERATE fields
+        data.fields.forEach(field => {
+          columnSensitivity[field.name] = field.sensitivity;
+        });
+      }
+    } catch (apiError) {
+      console.error(`Authenticated column analysis fetch error for ${table.id}:`, apiError);
+      // Continue - columns already initialized as 'low'
     }
 
+    // Always store columns (even if AI failed)
     state.loggedInData.allColumnSensitivity[table.id] = columnSensitivity;
+
+    // Calculate highest sensitivity for table classification
+    let highestSensitivity = 'low';
+    const sensitiveFields = [];
+    Object.entries(columnSensitivity).forEach(([name, sensitivity]) => {
+      if (sensitivity === 'high') {
+        highestSensitivity = 'high';
+        sensitiveFields.push(name);
+      } else if (sensitivity === 'moderate' && highestSensitivity !== 'high') {
+        highestSensitivity = 'moderate';
+        sensitiveFields.push(name);
+      }
+    });
 
     if (highestSensitivity !== 'low') {
       state.loggedInData.tableSensitivity[table.id] = {
