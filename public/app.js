@@ -5365,7 +5365,7 @@ window.exportSchemaCSV = async function(roleName) {
 
   // Build CSV rows - one row per column with column-level counts
   // Include ALL columns from schema, marking visibility based on whether data was found
-  const header = ['Table', 'Description', 'Table Classification', 'Column', 'Column Classification', 'Column Count', 'Visible'];
+  const header = ['Table', 'Description', 'Table Classification', 'Table Count', 'Column', 'Column Classification', 'Column Count', 'Visible'];
   const rows = [header];
 
   for (const table of state.tables) {
@@ -5386,6 +5386,7 @@ window.exportSchemaCSV = async function(roleName) {
     const tableSensitivity = sensitivityData?.[tableId];
     const description = state.tableDescriptions?.[tableId] || '';
     const tableClassification = tableSensitivity?.sensitivity || 'low';
+    const tableCount = recordCountData?.[tableId] ?? table.recordCount ?? 0;
 
     if (sortedColumns.length > 0) {
       // First column row includes table metadata
@@ -5395,6 +5396,7 @@ window.exportSchemaCSV = async function(roleName) {
         tableId,
         description,
         tableClassification,
+        tableCount,
         firstCol,
         firstColVisible ? (visibleColumns[firstCol] || 'low') : '',
         firstColVisible ? (columnCounts[firstCol] ?? '?') : 0,
@@ -5409,6 +5411,7 @@ window.exportSchemaCSV = async function(roleName) {
           '',  // Empty for cell merging
           '',
           '',
+          '',
           colName,
           isVisible ? (visibleColumns[colName] || 'low') : '',
           isVisible ? (columnCounts[colName] ?? '?') : 0,
@@ -5421,6 +5424,7 @@ window.exportSchemaCSV = async function(roleName) {
         tableId,
         description,
         tableClassification,
+        tableCount,
         '(no columns)',
         '',
         0,
