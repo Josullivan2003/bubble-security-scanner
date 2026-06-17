@@ -5364,48 +5364,59 @@ window.exportSchemaCSV = async function(roleName) {
   console.log('Descriptions:', state.tableDescriptions);
 
   // Build CSV rows - one row per column with column-level counts
+  // Include ALL columns from schema, marking visibility based on whether data was found
   const header = ['Table', 'Description', 'Table Classification', 'Column', 'Column Classification', 'Column Count', 'Visible'];
   const rows = [header];
 
   for (const table of state.tables) {
     const tableId = table.id;
-    const tableColumns = columnSensitivityData?.[tableId] || {};
-    const columnNames = Object.keys(tableColumns);
+
+    // Get columns from sensitivity data (columns with actual data)
+    const visibleColumns = columnSensitivityData?.[tableId] || {};
     const columnCounts = state.allColumnCounts?.[tableId] || {};
+
+    // Get ALL columns from schema
+    const schemaTable = state.tablesWithColumns?.find(t => t.name === tableId);
+    const schemaColumns = schemaTable?.columns?.map(c => c.name) || [];
+
+    // Merge: all schema columns + any visible columns not in schema
+    const allColumns = new Set([...schemaColumns, ...Object.keys(visibleColumns)]);
+    const sortedColumns = Array.from(allColumns).sort();
 
     const tableSensitivity = sensitivityData?.[tableId];
     const description = state.tableDescriptions?.[tableId] || '';
     const tableClassification = tableSensitivity?.sensitivity || 'low';
 
-    if (columnNames.length > 0) {
-      const sortedColumns = columnNames.sort();
-
+    if (sortedColumns.length > 0) {
       // First column row includes table metadata
+      const firstCol = sortedColumns[0];
+      const firstColVisible = firstCol in visibleColumns;
       rows.push([
         tableId,
         description,
         tableClassification,
-        sortedColumns[0],
-        tableColumns[sortedColumns[0]] || 'low',
-        columnCounts[sortedColumns[0]] ?? '?',
-        'Yes'
+        firstCol,
+        firstColVisible ? (visibleColumns[firstCol] || 'low') : '',
+        firstColVisible ? (columnCounts[firstCol] ?? '?') : 0,
+        firstColVisible ? 'Yes' : 'No'
       ]);
 
       // Subsequent column rows have empty table metadata (for merging in Excel)
       for (let i = 1; i < sortedColumns.length; i++) {
         const colName = sortedColumns[i];
+        const isVisible = colName in visibleColumns;
         rows.push([
           '',  // Empty for cell merging
           '',
           '',
           colName,
-          tableColumns[colName] || 'low',
-          columnCounts[colName] ?? '?',
-          'Yes'
+          isVisible ? (visibleColumns[colName] || 'low') : '',
+          isVisible ? (columnCounts[colName] ?? '?') : 0,
+          isVisible ? 'Yes' : 'No'
         ]);
       }
     } else {
-      // Table has no visible columns
+      // Table has no columns at all
       rows.push([
         tableId,
         description,
@@ -5417,7 +5428,7 @@ window.exportSchemaCSV = async function(roleName) {
       ]);
     }
 
-    console.log(`${tableId}: ${columnNames.length} columns`);
+    console.log(`${tableId}: ${sortedColumns.length} columns (${Object.keys(visibleColumns).length} visible)`);
   }
 
   // Convert to CSV
